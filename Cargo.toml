@@ -4,3 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# Tokio providdes the async engine for URL checking
+tokio = {version = "1.38", features = ["full"]}
+
+# TLS and HTTP requests need reqwest
+reqwest = {version = "0.12", features = ["json"]}
+
+# Serde will conver raw JSON strings into type-sade
+serde = {version = "1.0", features = ["derive"]}
+serde_json = "1.0"
+
