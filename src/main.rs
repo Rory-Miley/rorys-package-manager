@@ -1,5 +1,8 @@
+mod installer;
 mod local;
 mod network;
+
+use std::path::Path;
 
 fn main() {
     // Beautiful pip-like UI style formatting
@@ -48,5 +51,24 @@ fn main() {
                 );
             }
         }
+    }
+
+    // --- QUICK DOWNLOADER TEST BLOCK ---
+    println!("\n\x1b[1;34m==>\x1b[0m \x1b[1mTesting Installer Engine Downloader...\x1b[0m");
+
+    // We will download a small sample text file to verify your streaming IO works
+    let test_url = "https://w3.org";
+    let test_destination = Path::new("./test_download.txt");
+
+    match installer::download_file(test_url, test_destination) {
+        Ok(()) => {
+            println!(
+                "  ✅ Success! File downloaded safely to {:?}",
+                test_destination
+            );
+            // Clean up the test file after ourselves
+            let _ = std::fs::remove_file(test_destination);
+        }
+        Err(e) => println!("  ❌ Downloader engine failed: {}", e),
     }
 }
