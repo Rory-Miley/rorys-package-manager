@@ -39,6 +39,12 @@
 - Task 2: Add clean terminal color coding and error outputs that are similar to pip
 
 
+## Future changes ##
+- instead of having hard coded handlers for normalization of app version release names
+	consider having a per app config
+- instead of storing these app repos hardcoaded, should have a hashed/encrypted data file that holds locally on the machine the app names and atributes.
+	This would be a config file that users could change? if not hashed/encrypted of course.
+
 ## Wishfull thinking ##
 - Cool CLI to add your own source directories for certain platforms
 - Offer custom install option where you manually select what apps you,
