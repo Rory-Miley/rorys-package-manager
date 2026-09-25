@@ -5,3 +5,5 @@
 
 # Downloaded archives + extract/mount workspace used by `upgrade`
 /local/staging/
+
+.DS_Store
