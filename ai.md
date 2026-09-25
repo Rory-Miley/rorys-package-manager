@@ -34,20 +34,23 @@ A macOS CLI package manager (`rpm`) for **unsigned** apps: check updates, downlo
 
 ## Decided product rules
 
-### CLI commands (planned; `cli.rs` not built yet)
+### CLI commands
 
 | Command | Behavior |
 |---------|----------|
-| `rpm update` | Check remotes, print status, **write** `local/cache.json` |
-| `rpm upgrade` | **Read** `local/cache.json`, then download + install pending apps |
+| `rpm update` | Check remotes, print status, **write** `local/cache.json` (preserves `managed`) |
+| `rpm upgrade` | **Read** cache, download + install pending apps; mark them `managed` |
+| `rpm install <app>` | Fetch latest for a tracked app, install, mark `managed` |
+| `rpm uninstall <app>` | Remove a **managed** app from `/Applications` and clear `managed` |
 | `rpm rollback [app]` | Revert using cached prior package (exact flag names TBD) |
 
-Other commands (`list`, `install`, etc.) are out of scope until added here.
+App names are matched case-insensitively (`qbittorrent` → `qBittorrent`).
 
 ### Update cache (`local/cache.json`)
 
-- Project-local file (for now): `local/cache.json` — written by update, read by upgrade/installer.
-- Fields per app: `name`, `local_version`, `remote_version`, `download_url`, `update_available`; plus top-level `updated_at` (unix seconds).
+- Project-local file (for now): `local/cache.json` — written by update/install/upgrade/uninstall.
+- Fields per app: `name`, `local_version`, `remote_version`, `download_url`, `update_available`, **`managed`** (bool — installed/upgraded by this tool).
+- `managed: true` is the list of rpm-owned installs; `uninstall` only removes those.
 - **No hashing/encryption** for now — contents are public release metadata on your machine; revisit later only if needed.
 - **Stale cache (planned, not implemented yet):** if cache is older than **1 day**, notify the user (e.g. suggest re-running `update`). Do not block other work on this yet.
 - Distinct from rollback package cache under `~/.config/.../cache/` (binary `.dmg`/`.zip` files).
@@ -81,8 +84,8 @@ Stop hardcoding the app list in source eventually; handlers stay in code. Near-t
 
 ### Quarantine
 
-- Strip quarantine **only after a successful upgrade** of that app (`xattr -dr com.apple.quarantine`).
-- Do **not** strip on check-only (`update`) or if upgrade failed.
+- Strip quarantine **only after a successful install or upgrade** of that app (`xattr -dr com.apple.quarantine`).
+- Do **not** strip on check-only (`update`), uninstall, or if install/upgrade failed.
 
 ### Version comparison
 
@@ -124,8 +127,8 @@ Stop hardcoding the app list in source eventually; handlers stay in code. Near-t
 - Safe replace into `/Applications` (norms above)
 - Hook quarantine strip after success
 
-### 6. CLI — planned `src/cli.rs` (or equivalent) + `main.rs`
-- Parse `update` / `upgrade` / `rollback`
+### 6. CLI — `src/cli.rs` + thin `main.rs`
+- Commands: `update` / `upgrade` / `install` / `uninstall` (+ `rollback` later)
 - pip-like colors and errors
 
 ---
@@ -162,7 +165,7 @@ Stop hardcoding the app list in source eventually; handlers stay in code. Near-t
 | `cache.rs` | Read/write `local/cache.json` |
 | `installer.rs` | Can load pending upgrades from cache; download-to-path only; no extract/replace yet |
 | `states.rs` | Missing |
-| CLI | `cli.rs` + thin `main`; `update` works; `upgrade` stubbed |
+| CLI | `update` / `upgrade` / `install` / `uninstall` |
 
 ---
 
@@ -176,3 +179,5 @@ Stop hardcoding the app list in source eventually; handlers stay in code. Near-t
 - Chose update→`local/cache.json`→upgrade handoff (no encryption); stale >1 day notify planned later.
 - Stabilized `network.rs`; added `cache.rs` + installer cache read; `main` writes cache for qBittorrent.
 - Added `cli.rs`: thin `main` → `cli::run`; implemented `update`; stubbed `upgrade`.
+- Implemented `upgrade` (dmg/zip → `/Applications` + quarantine).
+- **Scope add (user request):** `install` / `uninstall` + `managed` flag in `local/cache.json`.

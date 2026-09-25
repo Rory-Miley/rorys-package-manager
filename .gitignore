@@ -2,3 +2,6 @@
 
 # Update index written by `rpm update` (machine-local; do not commit)
 /local/cache.json
+
+# Downloaded archives + extract/mount workspace used by `upgrade`
+/local/staging/
