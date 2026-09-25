@@ -6,6 +6,7 @@ struct GitHubAsset {
     name: String,
     browser_download_url: String,
 }
+
 #[derive(Deserialize, Debug)]
 struct GitHubRelease {
     tag_name: String,
@@ -17,13 +18,14 @@ struct CodebergAsset {
     name: String,
     browser_download_url: String,
 }
+
 #[derive(Deserialize, Debug)]
 struct CodebergRelease {
     tag_name: String,
     assets: Vec<CodebergAsset>,
 }
 
-// Chromium Dash returns an array of release objects; we only need "version".
+/// Chromium Dash returns an array of release objects; we only need "version".
 #[derive(Deserialize, Debug)]
 struct ChromiumRelease {
     version: String,
@@ -55,10 +57,54 @@ fn build_client() -> Result<reqwest::blocking::Client, String> {
         .map_err(|e| format!("Failed to create client: {}", e))
 }
 
-/// Queries public GitHub Release endpoints to discover the newest tagged deployment.
-pub fn fetch_github_version(repo: &str) -> Result<String, String> {
-    let url = format!("https://api.github.com/repos/{}/releases/latest", repo);
+/// Picks the best macOS download URL for the current CPU architecture.
+fn pick_mac_download_url<'a, I>(asset_names_and_urls: I, repo: &str) -> Result<String, String>
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
+    let current_arch = detect_mac_architecture();
+    let assets: Vec<(&str, &str)> = asset_names_and_urls.into_iter().collect();
 
+    let arch_match = assets.iter().find(|(name, _)| {
+        let name_lower = name.to_lowercase();
+        let is_mac_file = name_lower.ends_with(".dmg")
+            || name_lower.contains("mac")
+            || name_lower.contains("macos");
+
+        let matches_arch = if current_arch == "arm64" {
+            name_lower.contains("arm64")
+                || name_lower.contains("aarch64")
+                || name_lower.contains("apple-silicon")
+        } else {
+            name_lower.contains("x86_64")
+                || name_lower.contains("intel")
+                || name_lower.contains("x64")
+        };
+
+        let is_universal = name_lower.contains("universal");
+        is_mac_file && (matches_arch || is_universal)
+    });
+
+    if let Some((_, url)) = arch_match {
+        return Ok(url.to_string());
+    }
+
+    // Fallback: any .dmg if no arch-specific asset was found
+    assets
+        .iter()
+        .find(|(name, _)| name.to_lowercase().ends_with(".dmg"))
+        .map(|(_, url)| url.to_string())
+        .ok_or_else(|| {
+            format!(
+                "Could not find a valid macOS binary asset in repo: {}",
+                repo
+            )
+        })
+}
+
+/// Queries GitHub Releases for the latest tag and a matching macOS download URL.
+pub fn fetch_github_release(repo: &str) -> Result<(String, String), String> {
+    let url = format!("https://api.github.com/repos/{}/releases/latest", repo);
     let client = build_client()?;
 
     let response = client
@@ -80,56 +126,20 @@ pub fn fetch_github_version(repo: &str) -> Result<String, String> {
         .map_err(|e| format!("Failed to parse JSON payload: {}", e))?;
 
     let version = normalise_version(&release.tag_name);
-
-    let download_url = release
-        .assets
-        .iter()
-        .find(|asset| {
-            let asset_name_lower = asset.name.to_lowercase();
-            let is_mac_file = asset_name_lower.ends_with(".dmg")
-                || asset_name_lower.contains("mac")
-                || asset_name_lower.contains("macos");
-
-            let matches_arch = if current_arch == "arm64" {
-                // Keywords common for Apple Silicon binaries
-                asset_name_lower.contains("arm64")
-                    || asset_name_lower.contains("aarch64")
-                    || asset_name_lower.contains("apple-silicon")
-            } else {
-                // Keywords common for Intel binaries
-                asset_name_lower.contains("x86_64")
-                    || asset_name_lower.contains("intel")
-                    || asset_name_lower.contains("x64")
-            };
-
-            // Exceptional fallback: If an app distributes a "universal" binary, it works on both architectures
-            let is_universal = asset_name_lower.contains("universal");
-
-            is_mac_file && (matches_arch || is_universal)
-        })
-        .map(|asset| asset.browser_download_url.clone())
-        // Fallback: If no arch-specific binary was found, grab any valid mac asset as a last resort
-        .or_else(|| {
-            release
-                .assets
-                .iter()
-                .find(|asset| asset.name.ends_with(".dmg"))
-                .map(|asset| asset.browser_download_url.clone())
-        })
-        .ok_or_else(|| {
-            format!(
-                "Could not find a valid macOS binary asset in repo: {}",
-                repo
-            )
-        })?;
+    let download_url = pick_mac_download_url(
+        release
+            .assets
+            .iter()
+            .map(|a| (a.name.as_str(), a.browser_download_url.as_str())),
+        repo,
+    )?;
 
     Ok((version, download_url))
 }
 
-/// Queries a Codeberg (Gitea-based) repository's latest tagged release.
-pub fn fetch_codeberg_version(repo: &str) -> Result<String, String> {
+/// Queries Codeberg (Gitea) for the latest tag and a matching macOS download URL.
+pub fn fetch_codeberg_release(repo: &str) -> Result<(String, String), String> {
     let url = format!("https://codeberg.org/api/v1/repos/{}/releases/latest", repo);
-
     let client = build_client()?;
 
     let response = client
@@ -146,64 +156,34 @@ pub fn fetch_codeberg_version(repo: &str) -> Result<String, String> {
         ));
     }
 
-    // Codeberg's Gitea API returns the same "tag_name" shape as GitHub's.
     let release: CodebergRelease = response
         .json()
         .map_err(|e| format!("Failed to parse JSON payload: {}", e))?;
 
     let version = normalise_version(&release.tag_name);
-
-    let download_url = release
-        .assets
-        .iter()
-        .find(|asset| {
-            let asset_name_lower = asset.name.to_lowercase();
-            let is_mac_file = asset_name_lower.ends_with(".dmg")
-                || asset_name_lower.contains("mac")
-                || asset_name_lower.contains("macos");
-
-            let matches_arch = if current_arch == "arm64" {
-                // Keywords common for Apple Silicon binaries
-                asset_name_lower.contains("arm64")
-                    || asset_name_lower.contains("aarch64")
-                    || asset_name_lower.contains("apple-silicon")
-            } else {
-                // Keywords common for Intel binaries
-                asset_name_lower.contains("x86_64")
-                    || asset_name_lower.contains("intel")
-                    || asset_name_lower.contains("x64")
-            };
-
-            // Exceptional fallback: If an app distributes a "universal" binary, it works on both architectures
-            let is_universal = asset_name_lower.contains("universal");
-
-            is_mac_file && (matches_arch || is_universal)
-        })
-        .map(|asset| asset.browser_download_url.clone())
-        // Fallback: If no arch-specific binary was found, grab any valid mac asset as a last resort
-        .or_else(|| {
-            release
-                .assets
-                .iter()
-                .find(|asset| asset.name.ends_with(".dmg"))
-                .map(|asset| asset.browser_download_url.clone())
-        })
-        .ok_or_else(|| {
-            format!(
-                "Could not find a valid macOS binary asset in repo: {}",
-                repo
-            )
-        })?;
+    let download_url = pick_mac_download_url(
+        release
+            .assets
+            .iter()
+            .map(|a| (a.name.as_str(), a.browser_download_url.as_str())),
+        repo,
+    )?;
 
     Ok((version, download_url))
 }
 
+/// Version-only helpers (no download URL — used when the source has no asset list).
+pub fn fetch_github_version(repo: &str) -> Result<String, String> {
+    fetch_github_release(repo).map(|(version, _)| version)
+}
+
+pub fn fetch_codeberg_version(repo: &str) -> Result<String, String> {
+    fetch_codeberg_release(repo).map(|(version, _)| version)
+}
+
 /// Queries the Chromium Dash release API for the current Stable version on macOS.
-/// This mirrors what Homebrew/other package managers use in place of the
-/// old (now defunct) omahaproxy.appspot.com endpoint.
 pub fn fetch_chromium_version(_locator: &str) -> Result<String, String> {
     let url = "https://chromiumdash.appspot.com/fetch_releases?channel=Stable&platform=Mac&num=1";
-
     let client = build_client()?;
 
     let response = client
@@ -230,8 +210,7 @@ pub fn fetch_chromium_version(_locator: &str) -> Result<String, String> {
     Ok(normalise_version(&latest.version))
 }
 
-/// Downloads a raw plain-text payload directly from a file link.
-/// Used for unstructured trackers like snapshot 'LAST_CHANGE' manifests.
+/// Downloads a raw plain-text payload (e.g. snapshot LAST_CHANGE manifests).
 pub fn fetch_raw_url_version(url: &str) -> Result<String, String> {
     let client = build_client()?;
 
