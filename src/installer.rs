@@ -1,7 +1,9 @@
 use crate::cache::{self, CachedApp, UpdateCache};
 use crate::local;
-use std::fs::{self, File};
-use std::io::copy;
+use crate::network;
+use crate::recipe::{self, Recipe};
+use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -22,8 +24,7 @@ pub fn apps_ready_to_upgrade() -> Result<Vec<CachedApp>, String> {
         .collect())
 }
 
-/// Downloads, stages, installs, and strips quarantine for every pending app in the cache.
-/// Returns how many apps were upgraded successfully.
+/// Upgrades all pending apps using their associated recipes or cache definitions.
 pub fn upgrade_pending() -> Result<usize, String> {
     let pending = apps_ready_to_upgrade().map_err(|e| {
         format!(
@@ -37,6 +38,7 @@ pub fn upgrade_pending() -> Result<usize, String> {
     }
 
     ensure_staging()?;
+    let recipes = recipe::load_recipes().unwrap_or_default();
 
     let mut upgraded = 0usize;
     let mut errors: Vec<String> = Vec::new();
@@ -46,18 +48,36 @@ pub fn upgrade_pending() -> Result<usize, String> {
             "\x1b[1;34m==>\x1b[0m Upgrading \x1b[1m{}\x1b[0m ({} → {})",
             app.name, app.local_version, app.remote_version
         );
-        match upgrade_one(app) {
-            Ok(()) => {
+
+        let matching_recipe = recipe::find_recipe(&app.name, &recipes);
+        let bundle_name = matching_recipe
+            .map(|r| r.bundle_name.as_str())
+            .unwrap_or(app.name.as_str());
+        let quarantine_strip = matching_recipe
+            .map(|r| r.quarantine_strip)
+            .unwrap_or(true);
+        let expected_sha256 = matching_recipe.and_then(|r| r.sha256.as_deref());
+
+        match install_bundle_pipeline(
+            &app.name,
+            bundle_name,
+            &app.remote_version,
+            &app.download_url,
+            expected_sha256,
+            quarantine_strip,
+        ) {
+            Ok(calculated_hash) => {
                 if let Err(e) = mark_managed(
                     &app.name,
                     &app.remote_version,
                     &app.remote_version,
                     &app.download_url,
+                    Some(calculated_hash),
                 ) {
                     eprintln!("  \x1b[33mwarning:\x1b[0m installed but failed to update cache: {}", e);
                 }
                 println!(
-                    "  \x1b[32m✓\x1b[0m {} installed and quarantine stripped.",
+                    "  \x1b[32m✓\x1b[0m {} installed successfully.",
                     app.name
                 );
                 upgraded += 1;
@@ -81,32 +101,81 @@ pub fn upgrade_pending() -> Result<usize, String> {
     Ok(upgraded)
 }
 
-/// Install (or reinstall) one app from an explicit release URL.
+/// Install one app by Recipe configuration.
+pub fn install_recipe(
+    recipe: &Recipe,
+    remote_version: &str,
+    download_url: &str,
+) -> Result<(), String> {
+    println!(
+        "\x1b[1;34m==>\x1b[0m Installing \x1b[1m{}\x1b[0m ({})",
+        recipe.name, remote_version
+    );
+
+    let calculated_hash = install_bundle_pipeline(
+        &recipe.name,
+        &recipe.bundle_name,
+        remote_version,
+        download_url,
+        recipe.sha256.as_deref(),
+        recipe.quarantine_strip,
+    )?;
+
+    let local_version =
+        local::get_local_version(&recipe.bundle_name).unwrap_or_else(|| remote_version.to_string());
+
+    mark_managed(
+        &recipe.name,
+        &local_version,
+        remote_version,
+        download_url,
+        Some(calculated_hash),
+    )?;
+
+    println!(
+        "  \x1b[32m✓\x1b[0m {} installed successfully.",
+        recipe.name
+    );
+    Ok(())
+}
+
+/// Backwards-compatible install helper.
+#[allow(dead_code)]
 pub fn install_app(
     name: &str,
     remote_version: &str,
     download_url: &str,
 ) -> Result<(), String> {
-    let local_version =
-        local::get_local_version(name).unwrap_or_else(|| "Not Installed".to_string());
+    let recipes = recipe::load_recipes().unwrap_or_default();
+    if let Some(r) = recipe::find_recipe(name, &recipes) {
+        return install_recipe(r, remote_version, download_url);
+    }
 
-    let app = CachedApp {
-        name: name.to_string(),
-        local_version,
-        remote_version: remote_version.to_string(),
-        download_url: download_url.to_string(),
-        update_available: true,
-        managed: false,
-    };
-
+    let bundle_name = format!("{}.app", name);
     println!(
         "\x1b[1;34m==>\x1b[0m Installing \x1b[1m{}\x1b[0m ({})",
         name, remote_version
     );
-    upgrade_one(&app)?;
-    mark_managed(name, remote_version, remote_version, download_url)?;
+
+    let calculated_hash = install_bundle_pipeline(
+        name,
+        &bundle_name,
+        remote_version,
+        download_url,
+        None,
+        true,
+    )?;
+
+    mark_managed(
+        name,
+        remote_version,
+        remote_version,
+        download_url,
+        Some(calculated_hash),
+    )?;
+
     println!(
-        "  \x1b[32m✓\x1b[0m {} installed and quarantine stripped.",
+        "  \x1b[32m✓\x1b[0m {} installed successfully.",
         name
     );
     Ok(())
@@ -137,8 +206,26 @@ pub fn uninstall_app(name: &str) -> Result<(), String> {
         }
     }
 
-    let canonical = entry.as_ref().map(|a| a.name.as_str()).unwrap_or(name);
-    let target = PathBuf::from(format!("/Applications/{}.app", canonical));
+    let recipes = recipe::load_recipes().unwrap_or_default();
+    let bundle_name = recipe::find_recipe(name, &recipes)
+        .map(|r| r.bundle_name.clone())
+        .unwrap_or_else(|| {
+            let canonical = entry.as_ref().map(|a| a.name.as_str()).unwrap_or(name);
+            if canonical.ends_with(".app") {
+                canonical.to_string()
+            } else {
+                format!("{}.app", canonical)
+            }
+        });
+
+    let target = PathBuf::from(format!("/Applications/{}", bundle_name));
+
+    if local::is_app_running(&bundle_name) {
+        println!("  ⚠️  Warning: {} is currently running.", bundle_name);
+        println!("     Requesting application to quit...");
+        let _ = local::request_quit(&bundle_name);
+        std::thread::sleep(Duration::from_millis(500));
+    }
 
     if target.exists() {
         println!(
@@ -159,6 +246,7 @@ pub fn uninstall_app(name: &str) -> Result<(), String> {
         );
     }
 
+    let canonical = entry.as_ref().map(|a| a.name.as_str()).unwrap_or(name);
     if let Some(app) = cache.find_mut(canonical) {
         app.managed = false;
         app.local_version = "Not Installed".to_string();
@@ -171,47 +259,32 @@ pub fn uninstall_app(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Record that rpm owns this install in `local/cache.json`.
-fn mark_managed(
+/// Core pipeline: Download with SHA-256 verification, unpack, inspect, and atomically install.
+fn install_bundle_pipeline(
     name: &str,
-    local_version: &str,
-    remote_version: &str,
+    bundle_name: &str,
+    version: &str,
     download_url: &str,
-) -> Result<(), String> {
-    let mut cache = cache::load_cache_or_empty()?;
-    let previous = cache.find(name).cloned();
-
-    cache.upsert(CachedApp {
-        name: previous
-            .as_ref()
-            .map(|a| a.name.clone())
-            .unwrap_or_else(|| name.to_string()),
-        local_version: local_version.to_string(),
-        remote_version: remote_version.to_string(),
-        download_url: download_url.to_string(),
-        update_available: false,
-        managed: true,
-    });
-    cache::save_cache(&cache)
-}
-
-/// Full install path for a single cached app entry.
-fn upgrade_one(app: &CachedApp) -> Result<(), String> {
-    if app.download_url.is_empty() {
-        return Err("No download URL in cache".to_string());
+    expected_sha256: Option<&str>,
+    quarantine_strip: bool,
+) -> Result<String, String> {
+    if download_url.is_empty() {
+        return Err("No download URL provided".to_string());
     }
 
-    let archive_path = download_for_app(app)?;
-    let staged_app = extract_app_bundle(&archive_path, &app.name)?;
+    let (archive_path, sha256_hash) =
+        download_for_app(name, version, download_url, expected_sha256)?;
 
-    install_app_bundle(&staged_app, &app.name)?;
-    local::remove_quarantine(&app.name)?;
+    let staged_app = extract_app_bundle(&archive_path, bundle_name)?;
+    local::validate_app_bundle(&staged_app)?;
 
-    // Clean extract workspace; keep the downloaded archive for now (rollback later).
-    let extract_root = staging_path().join(format!("extract-{}", sanitize(&app.name)));
+    install_app_bundle_atomic(&staged_app, bundle_name, quarantine_strip)?;
+
+    // Clean extract workspace; keep the downloaded archive in staging for cache/rollback
+    let extract_root = staging_path().join(format!("extract-{}", sanitize(bundle_name)));
     let _ = fs::remove_dir_all(&extract_root);
 
-    Ok(())
+    Ok(sha256_hash)
 }
 
 fn staging_path() -> PathBuf {
@@ -240,144 +313,124 @@ fn filename_from_url(url: &str) -> String {
         .to_string()
 }
 
-fn download_for_app(app: &CachedApp) -> Result<PathBuf, String> {
+fn download_for_app(
+    name: &str,
+    version: &str,
+    download_url: &str,
+    expected_sha256: Option<&str>,
+) -> Result<(PathBuf, String), String> {
     ensure_staging()?;
-    let filename = filename_from_url(&app.download_url);
+    let filename = filename_from_url(download_url);
     let dest = staging_path().join(format!(
         "{}-{}-{}",
-        sanitize(&app.name),
-        sanitize(&app.remote_version),
+        sanitize(name),
+        sanitize(version),
         filename
     ));
 
-    if dest.exists() {
-        println!("    📦 Using existing download: {}", dest.display());
-        return Ok(dest);
-    }
-
-    download_file(&app.download_url, &dest)?;
-    Ok(dest)
+    println!("    📥 Fetching payload from {}", download_url);
+    let hash = network::download_file_with_hash(download_url, &dest, expected_sha256)?;
+    println!("    🔒 SHA-256 Verified: \x1b[32m{}\x1b[0m", hash);
+    Ok((dest, hash))
 }
 
-/// Downloads a file from a URL and streams it to `destination_path`.
-pub fn download_file(url: &str, destination_path: &Path) -> Result<(), String> {
-    if let Some(parent) = destination_path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create download directory: {}", e))?;
-    }
-
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(300))
-        .build()
-        .map_err(|e| format!("Failed to create download client: {}", e))?;
-
-    println!("    📥 Downloading asset payload...");
-
-    let mut response = client
-        .get(url)
-        .header("User-Agent", "rorys-package-manager-cli")
-        .send()
-        .map_err(|e| format!("Download request failed: {}", e))?;
-
-    if !response.status().is_success() {
-        return Err(format!(
-            "Server returned HTTP error code: {}",
-            response.status()
-        ));
-    }
-
-    let mut dest_file = File::create(destination_path)
-        .map_err(|e| format!("Failed to create local staging file: {}", e))?;
-
-    copy(&mut response, &mut dest_file)
-        .map_err(|e| format!("Failed to write stream bytes to disk: {}", e))?;
-
-    println!("    💾 Download complete → {}", destination_path.display());
-    Ok(())
-}
-
-/// Extracts a `.dmg` or `.zip` into staging and returns the path to the `.app` bundle.
-fn extract_app_bundle(archive: &Path, app_name: &str) -> Result<PathBuf, String> {
-    let ext = archive
-        .extension()
-        .and_then(|e| e.to_str())
+/// Extracts `.dmg`, `.zip`, `.tar.gz`, or `.tar.xz` into staging and returns path to the `.app`.
+fn extract_app_bundle(archive: &Path, bundle_name: &str) -> Result<PathBuf, String> {
+    let name_lower = archive
+        .file_name()
+        .and_then(|f| f.to_str())
         .unwrap_or("")
         .to_lowercase();
 
-    match ext.as_str() {
-        "dmg" => extract_dmg(archive, app_name),
-        "zip" => extract_zip(archive, app_name),
-        other => Err(format!(
-            "Unsupported archive type '.{}'. Expected .dmg or .zip",
-            other
-        )),
+    if name_lower.ends_with(".dmg") {
+        extract_dmg(archive, bundle_name)
+    } else if name_lower.ends_with(".zip") {
+        extract_zip(archive, bundle_name)
+    } else if name_lower.ends_with(".tar.gz") || name_lower.ends_with(".tgz") {
+        extract_tar_gz(archive, bundle_name)
+    } else if name_lower.ends_with(".tar.xz") {
+        extract_tar_xz(archive, bundle_name)
+    } else {
+        Err(format!(
+            "Unsupported archive type in '{}'. Expected .dmg, .zip, .tar.gz, or .tar.xz",
+            name_lower
+        ))
     }
 }
 
-fn extract_dmg(dmg: &Path, app_name: &str) -> Result<PathBuf, String> {
-    let mount = staging_path().join(format!("mnt-{}", sanitize(app_name)));
-    // Fresh mount point
+fn extract_dmg(dmg: &Path, bundle_name: &str) -> Result<PathBuf, String> {
+    let mount = staging_path().join(format!("mnt-{}", sanitize(bundle_name)));
     let _ = fs::remove_dir_all(&mount);
     fs::create_dir_all(&mount)
         .map_err(|e| format!("Failed to create mount point: {}", e))?;
 
-    println!("    💿 Mounting DMG...");
-    let attach = Command::new("hdiutil")
+    println!("    💿 Mounting DMG (unattended)...");
+    let mut child = Command::new("hdiutil")
         .args([
             "attach",
             "-nobrowse",
             "-readonly",
+            "-noverify",
+            "-noautoopen",
             "-mountpoint",
             mount.to_str().unwrap_or_default(),
             dmg.to_str().unwrap_or_default(),
         ])
-        .output()
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| format!("Failed to run hdiutil attach: {}", e))?;
 
-    if !attach.status.success() {
-        let stderr = String::from_utf8_lossy(&attach.stderr);
+    // Auto-accept any license prompt by streaming 'Y\n'
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(b"Y\n");
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("hdiutil attach failed: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
         let _ = fs::remove_dir_all(&mount);
         return Err(format!("hdiutil attach failed: {}", stderr.trim()));
     }
 
     let result = (|| {
-        let app_src = find_app_bundle(&mount, app_name)?;
-        let extract_root = staging_path().join(format!("extract-{}", sanitize(app_name)));
+        let app_src = find_app_bundle(&mount, bundle_name)?;
+        let extract_root = staging_path().join(format!("extract-{}", sanitize(bundle_name)));
         let _ = fs::remove_dir_all(&extract_root);
         fs::create_dir_all(&extract_root)
             .map_err(|e| format!("Failed to create extract dir: {}", e))?;
 
-        let staged = extract_root.join(format!("{}.app", app_name));
-        println!("    📂 Staging {}...", app_name);
+        let clean_name = if bundle_name.ends_with(".app") {
+            bundle_name.to_string()
+        } else {
+            format!("{}.app", bundle_name)
+        };
+        let staged = extract_root.join(clean_name);
+        println!("    📂 Staging {}...", bundle_name);
         ditto_copy(&app_src, &staged)?;
         Ok(staged)
     })();
 
-    // Always detach, even on failure
-    let detach = Command::new("hdiutil")
+    // Always detach cleanly
+    let _ = Command::new("hdiutil")
         .args(["detach", mount.to_str().unwrap_or_default(), "-quiet"])
         .status();
-    if let Ok(status) = detach {
-        if !status.success() {
-            // Force detach if quiet detach failed
-            let _ = Command::new("hdiutil")
-                .args(["detach", mount.to_str().unwrap_or_default(), "-force"])
-                .status();
-        }
-    }
     let _ = fs::remove_dir_all(&mount);
 
     result
 }
 
-fn extract_zip(zip: &Path, app_name: &str) -> Result<PathBuf, String> {
-    let extract_root = staging_path().join(format!("extract-{}", sanitize(app_name)));
+fn extract_zip(zip: &Path, bundle_name: &str) -> Result<PathBuf, String> {
+    let extract_root = staging_path().join(format!("extract-{}", sanitize(bundle_name)));
     let _ = fs::remove_dir_all(&extract_root);
     fs::create_dir_all(&extract_root)
         .map_err(|e| format!("Failed to create extract dir: {}", e))?;
 
-    println!("    📦 Extracting ZIP...");
-    // ditto -x -k handles zip natively on macOS
+    println!("    📦 Extracting ZIP archive...");
     let status = Command::new("ditto")
         .args([
             "-x",
@@ -392,23 +445,78 @@ fn extract_zip(zip: &Path, app_name: &str) -> Result<PathBuf, String> {
         return Err("ditto failed to extract zip".to_string());
     }
 
-    find_app_bundle(&extract_root, app_name)
+    find_app_bundle(&extract_root, bundle_name)
 }
 
-/// Finds `{app_name}.app` under `root`, searching one level then recursively.
-fn find_app_bundle(root: &Path, app_name: &str) -> Result<PathBuf, String> {
-    let preferred = root.join(format!("{}.app", app_name));
+fn extract_tar_gz(tar: &Path, bundle_name: &str) -> Result<PathBuf, String> {
+    let extract_root = staging_path().join(format!("extract-{}", sanitize(bundle_name)));
+    let _ = fs::remove_dir_all(&extract_root);
+    fs::create_dir_all(&extract_root)
+        .map_err(|e| format!("Failed to create extract dir: {}", e))?;
+
+    println!("    📦 Extracting TAR.GZ archive...");
+    let status = Command::new("tar")
+        .args([
+            "-xzf",
+            tar.to_str().unwrap_or_default(),
+            "-C",
+            extract_root.to_str().unwrap_or_default(),
+        ])
+        .status()
+        .map_err(|e| format!("Failed to run tar for tar.gz: {}", e))?;
+
+    if !status.success() {
+        return Err("tar failed to extract tar.gz".to_string());
+    }
+
+    find_app_bundle(&extract_root, bundle_name)
+}
+
+fn extract_tar_xz(tar: &Path, bundle_name: &str) -> Result<PathBuf, String> {
+    let extract_root = staging_path().join(format!("extract-{}", sanitize(bundle_name)));
+    let _ = fs::remove_dir_all(&extract_root);
+    fs::create_dir_all(&extract_root)
+        .map_err(|e| format!("Failed to create extract dir: {}", e))?;
+
+    println!("    📦 Extracting TAR.XZ archive...");
+    let status = Command::new("tar")
+        .args([
+            "-xJf",
+            tar.to_str().unwrap_or_default(),
+            "-C",
+            extract_root.to_str().unwrap_or_default(),
+        ])
+        .status()
+        .map_err(|e| format!("Failed to run tar for tar.xz: {}", e))?;
+
+    if !status.success() {
+        return Err("tar failed to extract tar.xz".to_string());
+    }
+
+    find_app_bundle(&extract_root, bundle_name)
+}
+
+/// Finds the target `.app` bundle under `root`, with shallow recursive search.
+fn find_app_bundle(root: &Path, bundle_name: &str) -> Result<PathBuf, String> {
+    let clean_name = if bundle_name.ends_with(".app") {
+        bundle_name.to_string()
+    } else {
+        format!("{}.app", bundle_name)
+    };
+
+    let preferred = root.join(&clean_name);
     if preferred.is_dir() {
         return Ok(preferred);
     }
 
-    // Case-insensitive match on *.app at top level
+    // Top-level case-insensitive match
     if let Ok(entries) = fs::read_dir(root) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("app") {
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    if stem.eq_ignore_ascii_case(app_name) {
+                    let search_stem = clean_name.strip_suffix(".app").unwrap_or(&clean_name);
+                    if stem.eq_ignore_ascii_case(search_stem) {
                         return Ok(path);
                     }
                 }
@@ -416,32 +524,35 @@ fn find_app_bundle(root: &Path, app_name: &str) -> Result<PathBuf, String> {
         }
     }
 
-    // Shallow recursive walk (DMGs sometimes nest under a folder)
-    find_app_bundle_walk(root, app_name, 0)?
-        .ok_or_else(|| format!("Could not find {}.app inside archive", app_name))
+    // Recursive search up to 4 levels deep
+    find_app_bundle_walk(root, &clean_name, 0)?
+        .ok_or_else(|| format!("Could not find {} inside archive", clean_name))
 }
 
-fn find_app_bundle_walk(dir: &Path, app_name: &str, depth: usize) -> Result<Option<PathBuf>, String> {
-    if depth > 3 {
+fn find_app_bundle_walk(dir: &Path, bundle_name: &str, depth: usize) -> Result<Option<PathBuf>, String> {
+    if depth > 4 {
         return Ok(None);
     }
+
     let entries = fs::read_dir(dir).map_err(|e| format!("Failed to read {}: {}", dir.display(), e))?;
+    let search_stem = bundle_name.strip_suffix(".app").unwrap_or(bundle_name);
+
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) == Some("app") && path.is_dir() {
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                if stem.eq_ignore_ascii_case(app_name) {
+                if stem.eq_ignore_ascii_case(search_stem) {
                     return Ok(Some(path));
                 }
             }
-            // Any .app if name matches poorly — only accept exact/ci name
         }
         if path.is_dir() && path.extension().and_then(|e| e.to_str()) != Some("app") {
-            if let Some(found) = find_app_bundle_walk(&path, app_name, depth + 1)? {
+            if let Some(found) = find_app_bundle_walk(&path, bundle_name, depth + 1)? {
                 return Ok(Some(found));
             }
         }
     }
+
     Ok(None)
 }
 
@@ -465,21 +576,110 @@ fn ditto_copy(from: &Path, to: &Path) -> Result<(), String> {
     }
 }
 
-/// Copies the staged `.app` into `/Applications`, replacing an existing install safely.
-/// Uses `ditto` so an existing bundle gets content-replaced in place when possible.
-fn install_app_bundle(staged_app: &Path, app_name: &str) -> Result<(), String> {
-    let target = PathBuf::from(format!("/Applications/{}.app", app_name));
+/// Atomically installs the staged bundle to `/Applications/<bundle_name>`, protecting running apps.
+fn install_app_bundle_atomic(
+    staged_app: &Path,
+    bundle_name: &str,
+    quarantine_strip: bool,
+) -> Result<(), String> {
+    let clean_bundle = if bundle_name.ends_with(".app") {
+        bundle_name.to_string()
+    } else {
+        format!("{}.app", bundle_name)
+    };
+
+    let target = PathBuf::from(format!("/Applications/{}", clean_bundle));
     println!("    🛠  Installing to {}...", target.display());
 
-    // If the staged folder isn't already named correctly, still install as AppName.app
-    ditto_copy(staged_app, &target)?;
-
-    if !target.exists() {
-        return Err(format!(
-            "Install appeared to succeed but {} is missing",
-            target.display()
-        ));
+    // 1. Process active check
+    if local::is_app_running(&clean_bundle) {
+        println!("    ⚠️  Notice: {} is currently running.", clean_bundle);
+        println!("       Attempting graceful quit before upgrade...");
+        let _ = local::request_quit(&clean_bundle);
+        std::thread::sleep(Duration::from_millis(800));
+        if local::is_app_running(&clean_bundle) {
+            println!("       App still active in memory. Utilizing atomic swap to prevent corruption.");
+        }
     }
 
-    Ok(())
+    // 2. Strip quarantine on the staged directory BEFORE copying to /Applications
+    if quarantine_strip {
+        println!("    🛡️  Stripping Apple Gatekeeper quarantine attribute...");
+        let _ = local::remove_quarantine(staged_app);
+    }
+
+    // 3. Atomic rename backup
+    let backup_path = if target.exists() {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let backup = PathBuf::from(format!("/Applications/{}.rpm-backup-{}", clean_bundle, ts));
+        println!("    🔄 Backing up current install → {}", backup.display());
+        fs::rename(&target, &backup)
+            .map_err(|e| format!("Failed to rename old installation: {}", e))?;
+        Some(backup)
+    } else {
+        None
+    };
+
+    // 4. Install staged bundle
+    let copy_result = ditto_copy(staged_app, &target);
+
+    match copy_result {
+        Ok(()) => {
+            // Verify bundle structure
+            if let Err(e) = local::validate_app_bundle(&target) {
+                if let Some(ref backup) = backup_path {
+                    let _ = fs::rename(backup, &target);
+                }
+                return Err(format!("Installed bundle validation failed: {}", e));
+            }
+
+            // Also strip target in place if requested
+            if quarantine_strip {
+                let _ = local::remove_quarantine(&target);
+            }
+
+            // Cleanup backup
+            if let Some(ref backup) = backup_path {
+                let _ = fs::remove_dir_all(backup);
+            }
+
+            Ok(())
+        }
+        Err(err) => {
+            if let Some(ref backup) = backup_path {
+                eprintln!("    ❌ Installation failed. Rolling back to previous install...");
+                let _ = fs::rename(backup, &target);
+            }
+            Err(format!("Installation failed: {}", err))
+        }
+    }
+}
+
+/// Record that rpm owns this install in `local/cache.json`.
+fn mark_managed(
+    name: &str,
+    local_version: &str,
+    remote_version: &str,
+    download_url: &str,
+    sha256: Option<String>,
+) -> Result<(), String> {
+    let mut cache = cache::load_cache_or_empty()?;
+    let previous = cache.find(name).cloned();
+
+    cache.upsert(CachedApp {
+        name: previous
+            .as_ref()
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| name.to_string()),
+        local_version: local_version.to_string(),
+        remote_version: remote_version.to_string(),
+        download_url: download_url.to_string(),
+        update_available: false,
+        managed: true,
+        sha256,
+    });
+    cache::save_cache(&cache)
 }

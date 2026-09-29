@@ -1,34 +1,14 @@
 //! CLI command dispatch.
 //!
-//! `main` stays thin: parse argv → `cli::run`. Commands live here and call
-//! `network` / `cache` / `local` / `installer` — not the other way around.
+//! `main` stays thin: parse argv → `cli::run`. Commands live here and coordinate
+//! `recipe` / `network` / `version` / `cache` / `local` / `installer`.
 
 use crate::cache::{self, CachedApp, UpdateCache};
 use crate::installer;
 use crate::local;
 use crate::network;
-
-/// Hardcoded catalog for now — later this moves to a user JSON config.
-/// Tuple: (display name, source type, locator)
-fn tracked_apps() -> Vec<(&'static str, &'static str, &'static str)> {
-    vec![("qBittorrent", "github", "qbittorrent/qBittorrent")]
-}
-
-fn resolve_catalog(
-    query: &str,
-) -> Result<(&'static str, &'static str, &'static str), String> {
-    tracked_apps()
-        .into_iter()
-        .find(|(name, _, _)| name.eq_ignore_ascii_case(query))
-        .ok_or_else(|| {
-            let known: Vec<&str> = tracked_apps().iter().map(|(n, _, _)| *n).collect();
-            format!(
-                "Unknown app '{}'. Tracked apps: {}",
-                query,
-                known.join(", ")
-            )
-        })
-}
+use crate::recipe;
+use crate::version::{self, VersionComparison};
 
 /// Entry point from `main`. Returns a process exit code (0 = success).
 pub fn run(args: &[String]) -> i32 {
@@ -51,6 +31,7 @@ pub fn run(args: &[String]) -> i32 {
                 1
             }
         },
+        "list" => cmd_list(),
         "help" | "--help" | "-h" => {
             print_help();
             0
@@ -64,28 +45,91 @@ pub fn run(args: &[String]) -> i32 {
 }
 
 fn print_help() {
+    let recipes = recipe::load_recipes().unwrap_or_default();
+    let tracked_names: Vec<String> = recipes
+        .iter()
+        .map(|r| {
+            if r.aliases.is_empty() {
+                r.name.clone()
+            } else {
+                format!("{} ({})", r.name, r.aliases.join(", "))
+            }
+        })
+        .collect();
+
     println!(
-        "\x1b[1mrorys-package-manager\x1b[0m — unsigned macOS app updater
+        "\x1b[1mrorys-package-manager\x1b[0m (v2) — unsigned macOS app package manager
 
 \x1b[1mUsage:\x1b[0m
   cargo run -- <command> [app]
 
 \x1b[1mCommands:\x1b[0m
-  update              Check apps against upstream and write local/cache.json
-  upgrade             Download and install pending updates (from cache)
-  install <app>       Install (or reinstall) a tracked app
-  uninstall <app>     Remove a managed app from /Applications
+  update              Check apps against upstream, evaluate versions, and write update cache
+  upgrade             Download, verify SHA-256, and install pending updates (from cache)
+  install <app>       Install (or reinstall) a tracked app by name or alias
+  uninstall <app>     Safely remove a managed app from /Applications
+  list                List all available package recipes and their local status
   help                Show this message
+
+\x1b[1mAvailable Recipes:\x1b[0m
+  {}
 
 \x1b[1mExamples:\x1b[0m
   cargo run -- update
-  cargo run -- install qbittorrent
+  cargo run -- install qbt
+  cargo run -- install chromium
+  cargo run -- upgrade
   cargo run -- uninstall qbittorrent
-"
+",
+        if tracked_names.is_empty() {
+            "None found in recipes/".to_string()
+        } else {
+            tracked_names.join("\n  ")
+        }
     );
 }
 
-/// `rpm upgrade` — read `local/cache.json`, download + install pending apps, strip quarantine.
+/// Lists all recipes and their current local installation status.
+fn cmd_list() -> i32 {
+    let recipes = match recipe::load_recipes() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("\x1b[31mFailed to load recipes: {}\x1b[0m", e);
+            return 1;
+        }
+    };
+
+    println!("\x1b[1;34m==>\x1b[0m \x1b[1mTracked Package Recipes ({}):\x1b[0m", recipes.len());
+    for r in &recipes {
+        let local_ver = local::get_local_version(&r.bundle_name)
+            .unwrap_or_else(|| "Not Installed".to_string());
+        let managed = cache::was_managed(&r.name);
+        let aliases_str = if r.aliases.is_empty() {
+            String::new()
+        } else {
+            format!(" [aliases: {}]", r.aliases.join(", "))
+        };
+
+        println!(
+            "  • \x1b[1m{}\x1b[0m{} — \x1b[36m{}\x1b[0m (Status: {}{})",
+            r.name,
+            aliases_str,
+            r.bundle_name,
+            if local_ver == "Not Installed" {
+                "\x1b[90mNot Installed\x1b[0m"
+            } else {
+                "\x1b[32mInstalled\x1b[0m"
+            },
+            if managed { " [managed]" } else { "" }
+        );
+        if let Some(desc) = &r.description {
+            println!("    \x1b[90m{}\x1b[0m", desc);
+        }
+    }
+    0
+}
+
+/// `rpm upgrade` — read `local/cache.json`, download + verify + install pending apps.
 fn cmd_upgrade() -> i32 {
     println!("\x1b[1;34m==>\x1b[0m \x1b[1mUpgrading apps from update cache...\x1b[0m");
 
@@ -112,39 +156,58 @@ fn cmd_upgrade() -> i32 {
 
 /// `rpm install <app>` — fetch latest release and install, then mark managed in cache.
 fn cmd_install(query: &str) -> i32 {
-    let (name, source_type, locator) = match resolve_catalog(query) {
-        Ok(entry) => entry,
+    let recipes = match recipe::load_recipes() {
+        Ok(r) => r,
         Err(e) => {
-            eprintln!("\x1b[31m{}\x1b[0m", e);
+            eprintln!("\x1b[31mFailed to load recipes: {}\x1b[0m", e);
             return 1;
         }
     };
 
-    let remote = match source_type {
-        "github" => network::fetch_github_release(locator),
-        "codeberg" => network::fetch_codeberg_release(locator),
-        other => Err(format!("Unsupported source type: {}", other)),
+    let recipe = match recipe::find_recipe(query, &recipes) {
+        Some(r) => r,
+        None => {
+            let available: Vec<&str> = recipes.iter().map(|r| r.name.as_str()).collect();
+            eprintln!(
+                "\x1b[31mUnknown app '{}'.\x1b[0m Available recipes: {}",
+                query,
+                available.join(", ")
+            );
+            return 1;
+        }
     };
 
-    let (remote_version, download_url) = match remote {
+    println!(
+        "\x1b[1;34m==>\x1b[0m Resolving package \x1b[1m{}\x1b[0m...",
+        recipe.name
+    );
+
+    let (remote_version, download_url) = match network::resolve_recipe(recipe) {
         Ok(pair) => pair,
         Err(e) => {
-            eprintln!("\x1b[31mFailed to fetch release:\x1b[0m {}", e);
+            eprintln!("\x1b[31mFailed to resolve release for {}: {}\x1b[0m", recipe.name, e);
             return 1;
         }
     };
 
-    let local_version =
-        local::get_local_version(name).unwrap_or_else(|| "Not Installed".to_string());
-    if local_version == remote_version && cache::was_managed(name) {
+    let local_version = local::get_local_version(&recipe.bundle_name)
+        .unwrap_or_else(|| "Not Installed".to_string());
+
+    let comparison = version::compare(&local_version, &remote_version);
+    if comparison == VersionComparison::UpToDate && cache::was_managed(&recipe.name) {
         println!(
-            "\x1b[1;34m==>\x1b[0m {} {} is already installed (managed).",
-            name, local_version
+            "\x1b[1;34m==>\x1b[0m {} {} is already installed and current.",
+            recipe.name, local_version
         );
         return 0;
+    } else if comparison == VersionComparison::AheadOfUpstream {
+        println!(
+            "\x1b[33mNotice:\x1b[0m Local version ({}) is newer than upstream ({}).",
+            local_version, remote_version
+        );
     }
 
-    match installer::install_app(name, &remote_version, &download_url) {
+    match installer::install_recipe(recipe, &remote_version, &download_url) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("\x1b[31minstall failed:\x1b[0m {}", e);
@@ -155,10 +218,10 @@ fn cmd_install(query: &str) -> i32 {
 
 /// `rpm uninstall <app>` — remove managed app from /Applications and cache.
 fn cmd_uninstall(query: &str) -> i32 {
-    // Prefer canonical catalog name when known; otherwise pass query through for cache lookup.
-    let name = resolve_catalog(query)
-        .map(|(n, _, _)| n.to_string())
-        .unwrap_or_else(|_| query.to_string());
+    let recipes = recipe::load_recipes().unwrap_or_default();
+    let name = recipe::find_recipe(query, &recipes)
+        .map(|r| r.name.clone())
+        .unwrap_or_else(|| query.to_string());
 
     match installer::uninstall_app(&name) {
         Ok(()) => 0,
@@ -169,61 +232,91 @@ fn cmd_uninstall(query: &str) -> i32 {
     }
 }
 
-/// `rpm update` — check remotes, print status, write `local/cache.json`.
+/// `rpm update` — check remotes, compare versions with >, and write `local/cache.json`.
 fn cmd_update() -> i32 {
     let arch = network::detect_mac_architecture();
     println!(
         "\x1b[1;34m==>\x1b[0m \x1b[1mDetected System Architecture:\x1b[0m \x1b[1;32m{}\x1b[0m",
         arch
     );
-    println!("\x1b[1;34m==>\x1b[0m \x1b[1mChecking apps and writing update cache...\x1b[0m");
+
+    let recipes = match recipe::load_recipes() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("\x1b[31mFailed to load recipes: {}\x1b[0m", e);
+            return 1;
+        }
+    };
+
+    println!(
+        "\x1b[1;34m==>\x1b[0m \x1b[1mChecking {} package recipe(s)...\x1b[0m",
+        recipes.len()
+    );
 
     let mut cached_apps: Vec<CachedApp> = Vec::new();
     let mut had_errors = false;
 
-    for (name, source_type, locator) in tracked_apps() {
-        print!("🔍 Checking {}... ", name);
+    for recipe in &recipes {
+        print!("🔍 Checking {}... ", recipe.name);
 
-        let local_version =
-            local::get_local_version(name).unwrap_or_else(|| "Not Installed".to_string());
-        let managed = cache::was_managed(name);
+        let local_version = local::get_local_version(&recipe.bundle_name)
+            .unwrap_or_else(|| "Not Installed".to_string());
+        let managed = cache::was_managed(&recipe.name);
 
-        let remote = match source_type {
-            "github" => network::fetch_github_release(locator),
-            "codeberg" => network::fetch_codeberg_release(locator),
-            other => Err(format!(
-                "Unsupported source type for cache export: {}",
-                other
-            )),
-        };
-
-        match remote {
+        match network::resolve_recipe(recipe) {
             Ok((remote_version, download_url)) => {
-                let update_available = local_version != remote_version;
-                if update_available {
-                    println!(
-                        "\n  🚀 Local: \x1b[33m{}\x1b[0m → Upstream: \x1b[32m{}\x1b[0m{}",
-                        local_version,
-                        remote_version,
-                        if managed { " [managed]" } else { "" }
-                    );
-                } else {
-                    println!(
-                        "\n  ✨ Local: \x1b[32m{}\x1b[0m | Upstream: \x1b[32m{}\x1b[0m (Current){}",
-                        local_version,
-                        remote_version,
-                        if managed { " [managed]" } else { "" }
-                    );
-                }
+                let comparison = version::compare(&local_version, &remote_version);
+                let update_available = match comparison {
+                    VersionComparison::UpdateAvailable => {
+                        println!(
+                            "\n  🚀 Local: \x1b[33m{}\x1b[0m → Upstream: \x1b[32m{}\x1b[0m (Update available){}",
+                            local_version,
+                            remote_version,
+                            if managed { " [managed]" } else { "" }
+                        );
+                        true
+                    }
+                    VersionComparison::UpToDate => {
+                        println!(
+                            "\n  ✨ Local: \x1b[32m{}\x1b[0m == Upstream: \x1b[32m{}\x1b[0m (Current){}",
+                            local_version,
+                            remote_version,
+                            if managed { " [managed]" } else { "" }
+                        );
+                        false
+                    }
+                    VersionComparison::AheadOfUpstream => {
+                        println!(
+                            "\n  💎 Local: \x1b[35m{}\x1b[0m > Upstream: \x1b[36m{}\x1b[0m (Ahead of upstream / Dev build){}",
+                            local_version,
+                            remote_version,
+                            if managed { " [managed]" } else { "" }
+                        );
+                        false
+                    }
+                    VersionComparison::NotInstalled => {
+                        println!(
+                            "\n  📦 Local: \x1b[90mNot Installed\x1b[0m → Upstream: \x1b[32m{}\x1b[0m{}",
+                            remote_version,
+                            if managed { " [managed]" } else { "" }
+                        );
+                        managed
+                    }
+                };
+
                 println!("  🔗 \x1b[90m{}\x1b[0m", download_url);
+                if let Some(ref expected_hash) = recipe.sha256 {
+                    println!("  🔒 Expected SHA-256: \x1b[90m{}\x1b[0m", expected_hash);
+                }
 
                 cached_apps.push(CachedApp {
-                    name: name.to_string(),
+                    name: recipe.name.clone(),
                     local_version,
                     remote_version,
                     download_url,
                     update_available,
                     managed,
+                    sha256: recipe.sha256.clone(),
                 });
             }
             Err(e) => {
@@ -233,10 +326,10 @@ fn cmd_update() -> i32 {
         }
     }
 
-    // Preserve any managed entries that aren't in the hardcoded catalog anymore.
+    // Preserve any legacy managed entries from cache that aren't in recipes
     if let Ok(previous) = cache::load_cache_or_empty() {
         for app in previous.apps {
-            if app.managed && !cached_apps.iter().any(|a| a.name == app.name) {
+            if app.managed && !cached_apps.iter().any(|a| a.name.eq_ignore_ascii_case(&app.name)) {
                 cached_apps.push(app);
             }
         }

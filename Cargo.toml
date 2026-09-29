@@ -13,3 +13,9 @@ reqwest = {version = "0.12", features = ["blocking","json"]}
 # Serde will conver raw JSON strings into type-sade
 serde = {version = "1.0", features = ["derive"]}
 serde_json = "1.0"
+
+# Cryptographic hashing for download integrity
+sha2 = "0.10"
+
+# Regular expressions for livecheck and asset matching
+regex = "1.10"

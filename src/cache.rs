@@ -20,6 +20,9 @@ pub struct CachedApp {
     /// True when this tool installed or upgraded the app (eligible for `uninstall`).
     #[serde(default)]
     pub managed: bool,
+    /// Cryptographic SHA-256 hash of the installed download asset (if verified/recorded).
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
