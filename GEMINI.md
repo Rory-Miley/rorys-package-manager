@@ -23,7 +23,7 @@ A macOS CLI package manager (`rpm`) for **unsigned** and custom macOS apps: chec
 |---|---|
 | Learn Rust | Clear, idiomatic, functional Rust |
 | Good CLI | pip-like: clear commands, colors, friendly errors |
-| Don't break | Atomic directory swap, backup/rollback, running app checks |
+| Don't break | Atomic directory swap, backup/rollback, running app checks, unmanaged app protection |
 | Be fast | Reasonable timeouts, stream downloads with single-pass hashing |
 | Easy to install | Low friction to get `rpm` onto a machine |
 | Recipe-driven | Declarative JSON recipes decoupled from host APIs |
@@ -37,14 +37,22 @@ A macOS CLI package manager (`rpm`) for **unsigned** and custom macOS apps: chec
 
 | Command | Behavior |
 |---|---|
-| `rpm update` | Scan all recipes in `recipes/`, resolve livecheck, compare versions (`>`), write `local/cache.json` |
-| `rpm upgrade` | Read cache, download, verify SHA-256, and install pending apps |
-| `rpm install <app>` | Resolve recipe by name or alias, fetch latest release, install atomically, mark `managed` |
+| `rpm update` | Scan recipes in `recipes/`, check versions; skip updates for unmanaged apps; write `local/cache.json` |
+| `rpm upgrade` | Read cache, download, verify SHA-256, and install pending **managed** apps |
+| `rpm install <app>` | Resolve recipe; refuse if target exists but is unmanaged; install atomically and mark `managed` |
 | `rpm uninstall <app>` | Safely remove a **managed** app from `/Applications` and clear `managed` in cache |
-| `rpm list` | List all tracked recipes, their aliases, and local installation status |
+| `rpm list` | List all tracked recipes, aliases, and status (`Installed [managed]`, `Installed [unmanaged]`, `Not Installed`) |
 | `rpm help` | Show usage, available commands, and tracked packages |
 
 App names and aliases are matched case-insensitively (`qbt` → `qBittorrent`, `chrome` → `Chromium`).
+
+### Unmanaged Package Security Policy (Homebrew-Inspired)
+
+To preserve user data and system integrity, `rpm` treats any application in `/Applications` not installed by `rpm` as **unmanaged**:
+1. **`rpm install <app>`**: If `/Applications/<bundle_name>` exists and is not managed by `rpm`, the installation aborts immediately with an explanatory error instructing the user to remove/uninstall the existing application first if they wish to manage it via `rpm`.
+2. **`rpm update`**: Remote checks run, but unmanaged installed applications are never flagged with `update_available: true`. Guidance is printed to the console explaining how to switch to `rpm`.
+3. **`rpm upgrade`**: Only upgrades apps where `managed: true`.
+4. **Installer pipelines**: `install_recipe`, `install_bundle_pipeline`, and `install_app_bundle_atomic` perform defense-in-depth checks preventing overwriting unmanaged bundles.
 
 ---
 
@@ -210,10 +218,14 @@ Package recipes live in the `recipes/` directory as individual JSON files (`reci
 ### 6. Update Cache — `src/cache.rs`
 - Manages `local/cache.json`.
 - Records `name`, `local_version`, `remote_version`, `download_url`, `update_available`, `managed`, and `sha256`.
+- `pending_upgrades`: Strictly filters for `managed && update_available && !download_url.is_empty()`.
+- `was_managed`: Helper checking if an app was previously installed by `rpm`.
 
 ### 7. CLI Dispatch — `src/cli.rs` + thin `src/main.rs`
 - Commands: `update`, `upgrade`, `install`, `uninstall`, `list`, `help`.
 - Formatted output with color badges for update states, download URLs, and verified checksums.
+- Clear distinction between `Installed [managed]` and `Installed [unmanaged]`.
+- Rejection of installs targeting unmanaged existing applications, presenting clear migration steps.
 
 ---
 
@@ -235,3 +247,9 @@ Package recipes live in the `recipes/` directory as individual JSON files (`reci
   - Added support for `.tar.gz` and `.tar.xz` archives, and automated DMG license agreement bypassing.
   - Added `rpm list` command.
   - Cleaned up compiler warnings, verified all unit tests pass, and pushed changes to `origin/master`.
+- **Unmanaged Package Protection (Homebrew Cask Integrity Pattern)**:
+  - Analyzed Homebrew Cask collision handling (`moved.rb`).
+  - Added multi-layer collision protection across CLI (`cmd_install`), installer (`install_recipe`, `install_bundle_pipeline`, `install_app_bundle_atomic`), and cache (`pending_upgrades`).
+  - Enforced refusal to overwrite or automatically update unmanaged existing applications in `/Applications`.
+  - Provided user-friendly error messages instructing how to uninstall outside `rpm` and reinstall via `cargo run -- install <app>`.
+  - Enhanced `rpm list` to show `[unmanaged]` vs `[managed]` status badges.

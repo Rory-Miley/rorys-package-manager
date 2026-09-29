@@ -44,6 +44,14 @@ pub fn upgrade_pending() -> Result<usize, String> {
     let mut errors: Vec<String> = Vec::new();
 
     for app in &pending {
+        if !app.managed {
+            println!(
+                "  \x1b[33mSkipping unmanaged app\x1b[0m '{}'. Only rpm-managed apps can be upgraded.",
+                app.name
+            );
+            continue;
+        }
+
         println!(
             "\x1b[1;34m==>\x1b[0m Upgrading \x1b[1m{}\x1b[0m ({} → {})",
             app.name, app.local_version, app.remote_version
@@ -107,6 +115,29 @@ pub fn install_recipe(
     remote_version: &str,
     download_url: &str,
 ) -> Result<(), String> {
+    let clean_bundle = if recipe.bundle_name.ends_with(".app") {
+        recipe.bundle_name.clone()
+    } else {
+        format!("{}.app", recipe.bundle_name)
+    };
+    let target = PathBuf::from(format!("/Applications/{}", clean_bundle));
+    if target.exists() && !cache::was_managed(&recipe.name) {
+        let alias = recipe.aliases.first().map(|s| s.as_str()).unwrap_or(&recipe.name);
+        return Err(format!(
+            "'{}' is already installed at /Applications/{} but is not managed by rpm.\n\
+             For security and system integrity, rpm will not overwrite applications installed outside this package manager.\n\
+             To manage '{}' with rpm:\n  \
+             1. Uninstall or remove '/Applications/{}' (e.g. drag to Trash or run: rm -rf '/Applications/{}')\n  \
+             2. Reinstall via rpm: cargo run -- install {}",
+            recipe.name,
+            clean_bundle,
+            recipe.name,
+            clean_bundle,
+            clean_bundle,
+            alias
+        ));
+    }
+
     println!(
         "\x1b[1;34m==>\x1b[0m Installing \x1b[1m{}\x1b[0m ({})",
         recipe.name, remote_version
@@ -270,6 +301,28 @@ fn install_bundle_pipeline(
 ) -> Result<String, String> {
     if download_url.is_empty() {
         return Err("No download URL provided".to_string());
+    }
+
+    let clean_bundle = if bundle_name.ends_with(".app") {
+        bundle_name.to_string()
+    } else {
+        format!("{}.app", bundle_name)
+    };
+    let target = PathBuf::from(format!("/Applications/{}", clean_bundle));
+    if target.exists() && !cache::was_managed(name) && !cache::was_managed(bundle_name) {
+        return Err(format!(
+            "'{}' is already installed at /Applications/{} but is not managed by rpm.\n\
+             For security and system integrity, rpm will not overwrite applications installed outside this package manager.\n\
+             To manage '{}' with rpm:\n  \
+             1. Uninstall or remove '/Applications/{}' (e.g. drag to Trash or run: rm -rf '/Applications/{}')\n  \
+             2. Reinstall via rpm: cargo run -- install {}",
+            name,
+            clean_bundle,
+            name,
+            clean_bundle,
+            clean_bundle,
+            name.to_lowercase()
+        ));
     }
 
     let (archive_path, sha256_hash) =
@@ -589,6 +642,13 @@ fn install_app_bundle_atomic(
     };
 
     let target = PathBuf::from(format!("/Applications/{}", clean_bundle));
+    let stem = clean_bundle.strip_suffix(".app").unwrap_or(&clean_bundle);
+    if target.exists() && !cache::was_managed(&clean_bundle) && !cache::was_managed(stem) {
+        return Err(format!(
+            "Target /Applications/{} already exists and is not managed by rpm. Refusing to overwrite.",
+            clean_bundle
+        ));
+    }
     println!("    🛠  Installing to {}...", target.display());
 
     // 1. Process active check

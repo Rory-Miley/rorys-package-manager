@@ -110,6 +110,14 @@ fn cmd_list() -> i32 {
             format!(" [aliases: {}]", r.aliases.join(", "))
         };
 
+        let status_suffix = if local_ver == "Not Installed" {
+            ""
+        } else if managed {
+            " [managed]"
+        } else {
+            " [unmanaged]"
+        };
+
         println!(
             "  • \x1b[1m{}\x1b[0m{} — \x1b[36m{}\x1b[0m (Status: {}{})",
             r.name,
@@ -120,7 +128,7 @@ fn cmd_list() -> i32 {
             } else {
                 "\x1b[32mInstalled\x1b[0m"
             },
-            if managed { " [managed]" } else { "" }
+            status_suffix
         );
         if let Some(desc) = &r.description {
             println!("    \x1b[90m{}\x1b[0m", desc);
@@ -177,6 +185,32 @@ fn cmd_install(query: &str) -> i32 {
         }
     };
 
+    let clean_bundle = if recipe.bundle_name.ends_with(".app") {
+        recipe.bundle_name.clone()
+    } else {
+        format!("{}.app", recipe.bundle_name)
+    };
+    let target = std::path::PathBuf::from(format!("/Applications/{}", clean_bundle));
+    let is_managed = cache::was_managed(&recipe.name);
+
+    if target.exists() && !is_managed {
+        let alias = recipe.aliases.first().map(|s| s.as_str()).unwrap_or(&recipe.name);
+        eprintln!(
+            "\x1b[31mError:\x1b[0m '{}' is already installed at /Applications/{} but is not managed by rpm.\n\
+             For security and system integrity, rpm will not overwrite applications installed outside this package manager.\n\
+             To manage '{}' with rpm:\n  \
+             1. Uninstall or remove '/Applications/{}' (e.g. drag to Trash or run: rm -rf '/Applications/{}')\n  \
+             2. Reinstall via rpm: cargo run -- install {}",
+            recipe.name,
+            clean_bundle,
+            recipe.name,
+            clean_bundle,
+            clean_bundle,
+            alias
+        );
+        return 1;
+    }
+
     println!(
         "\x1b[1;34m==>\x1b[0m Resolving package \x1b[1m{}\x1b[0m...",
         recipe.name
@@ -194,7 +228,7 @@ fn cmd_install(query: &str) -> i32 {
         .unwrap_or_else(|| "Not Installed".to_string());
 
     let comparison = version::compare(&local_version, &remote_version);
-    if comparison == VersionComparison::UpToDate && cache::was_managed(&recipe.name) {
+    if comparison == VersionComparison::UpToDate && is_managed {
         println!(
             "\x1b[1;34m==>\x1b[0m {} {} is already installed and current.",
             recipe.name, local_version
@@ -268,20 +302,32 @@ fn cmd_update() -> i32 {
                 let comparison = version::compare(&local_version, &remote_version);
                 let update_available = match comparison {
                     VersionComparison::UpdateAvailable => {
-                        println!(
-                            "\n  🚀 Local: \x1b[33m{}\x1b[0m → Upstream: \x1b[32m{}\x1b[0m (Update available){}",
-                            local_version,
-                            remote_version,
-                            if managed { " [managed]" } else { "" }
-                        );
-                        true
+                        if !managed && local_version != "Not Installed" {
+                            println!(
+                                "\n  ⚠️  Local: \x1b[33m{}\x1b[0m → Upstream: \x1b[32m{}\x1b[0m (Unmanaged: installed outside rpm)",
+                                local_version, remote_version
+                            );
+                            println!(
+                                "     \x1b[90mSkipping updates. To manage with rpm, uninstall it from /Applications and run 'cargo run -- install {}'.\x1b[0m",
+                                recipe.aliases.first().unwrap_or(&recipe.name.to_lowercase())
+                            );
+                            false
+                        } else {
+                            println!(
+                                "\n  🚀 Local: \x1b[33m{}\x1b[0m → Upstream: \x1b[32m{}\x1b[0m (Update available){}",
+                                local_version,
+                                remote_version,
+                                if managed { " [managed]" } else { "" }
+                            );
+                            managed
+                        }
                     }
                     VersionComparison::UpToDate => {
                         println!(
                             "\n  ✨ Local: \x1b[32m{}\x1b[0m == Upstream: \x1b[32m{}\x1b[0m (Current){}",
                             local_version,
                             remote_version,
-                            if managed { " [managed]" } else { "" }
+                            if managed { " [managed]" } else if local_version != "Not Installed" { " [unmanaged]" } else { "" }
                         );
                         false
                     }
@@ -290,17 +336,16 @@ fn cmd_update() -> i32 {
                             "\n  💎 Local: \x1b[35m{}\x1b[0m > Upstream: \x1b[36m{}\x1b[0m (Ahead of upstream / Dev build){}",
                             local_version,
                             remote_version,
-                            if managed { " [managed]" } else { "" }
+                            if managed { " [managed]" } else if local_version != "Not Installed" { " [unmanaged]" } else { "" }
                         );
                         false
                     }
                     VersionComparison::NotInstalled => {
                         println!(
-                            "\n  📦 Local: \x1b[90mNot Installed\x1b[0m → Upstream: \x1b[32m{}\x1b[0m{}",
-                            remote_version,
-                            if managed { " [managed]" } else { "" }
+                            "\n  📦 Local: \x1b[90mNot Installed\x1b[0m → Upstream: \x1b[32m{}\x1b[0m",
+                            remote_version
                         );
-                        managed
+                        false
                     }
                 };
 

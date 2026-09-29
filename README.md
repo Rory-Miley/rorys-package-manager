@@ -14,6 +14,7 @@ A fast, lightweight, and safe macOS package manager written in Rust, designed fo
 - **Pluggable Version Detection (`Livecheck`)**: Supports GitHub releases, Codeberg, Chromium Dash, raw URL manifests, and regex webpage scrapers.
 - **Multi-Container Support**: Handles `.dmg` (with automatic software license agreement acceptance), `.zip`, `.tar.gz`, and `.tar.xz` archives.
 - **Gatekeeper Quarantine Stripping**: Automatically strips Apple's `com.apple.quarantine` extended attribute on unsigned apps, with a per-package `quarantine_strip` toggle.
+- **Unmanaged Application Protection (Homebrew-Inspired)**: Refuses to overwrite or automatically update existing applications in `/Applications` that were not installed through `rpm`. Protects external or manual installs from unintended modification and provides clear migration instructions.
 
 ---
 
@@ -24,9 +25,10 @@ Scan all tracked recipes, query upstreams, compare versions, and refresh `local/
 ```sh
 cargo run -- update
 ```
+*(Unmanaged applications installed outside `rpm` are flagged with a notice and skipped from automatic update queues).*
 
 ### 2. Upgrade Pending Applications
-Download, verify SHA-256, and install pending updates from the cache:
+Download, verify SHA-256, and install pending updates from the cache (only manages `rpm`-tracked apps):
 ```sh
 cargo run -- upgrade
 ```
@@ -37,9 +39,10 @@ Install or reinstall an app by its canonical name or alias:
 cargo run -- install qbt
 cargo run -- install chromium
 ```
+> **Security Note:** If an application is already present under `/Applications` but was **not installed by `rpm`** (unmanaged), `rpm` refuses to overwrite it to preserve system integrity. To manage it with `rpm`, uninstall or remove the existing `.app` bundle first, then run `install`.
 
 ### 4. List Tracked Recipes
-View all available recipes, aliases, and their local installation status:
+View all available recipes, aliases, and their local installation status (`Installed [managed]`, `Installed [unmanaged]`, or `Not Installed`):
 ```sh
 cargo run -- list
 ```
@@ -107,9 +110,9 @@ For full recipe documentation and advanced options (such as regex web scrapers a
 - **`src/version.rs`**: Semantic version parsing and ordering (`Ord`, `PartialEq`).
 - **`src/network.rs`**: Streaming SHA-256 download client and pluggable Livecheck strategies.
 - **`src/local.rs`**: `Info.plist` version inspection, `pgrep` process checking, and quarantine removal.
-- **`src/installer.rs`**: Container extraction (.dmg, .zip, .tar), bundle validation, and atomic directory swap.
-- **`src/cache.rs`**: Local state tracking (`local/cache.json`).
-- **`src/cli.rs`**: CLI command dispatch and pip-style formatted output.
+- **`src/installer.rs`**: Container extraction (.dmg, .zip, .tar), bundle validation, atomic directory swap, and unmanaged bundle guards.
+- **`src/cache.rs`**: Local state tracking (`local/cache.json`) and `pending_upgrades` filtering for managed apps.
+- **`src/cli.rs`**: CLI command dispatch, unmanaged app protection warnings, and pip-style formatted output.
 
 ---
 

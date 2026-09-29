@@ -114,12 +114,12 @@ pub fn load_cache_from(path: &Path) -> Result<UpdateCache, String> {
     serde_json::from_str(&raw).map_err(|e| format!("Failed to parse {}: {}", path.display(), e))
 }
 
-/// Apps that have an update and a download URL ready for the installer.
+/// Apps that have an update, are managed by rpm, and have a download URL ready for the installer.
 pub fn pending_upgrades(cache: &UpdateCache) -> Vec<&CachedApp> {
     cache
         .apps
         .iter()
-        .filter(|app| app.update_available && !app.download_url.is_empty())
+        .filter(|app| app.managed && app.update_available && !app.download_url.is_empty())
         .collect()
 }
 
@@ -130,8 +130,58 @@ pub fn managed_apps(cache: &UpdateCache) -> Vec<&CachedApp> {
 
 /// Look up whether an app was previously marked managed (for preserving across `update`).
 pub fn was_managed(name: &str) -> bool {
+    let clean = name.strip_suffix(".app").unwrap_or(name);
     load_cache_or_empty()
         .ok()
-        .and_then(|c| c.find(name).map(|a| a.managed))
+        .and_then(|c| {
+            c.apps
+                .iter()
+                .find(|a| {
+                    a.name.eq_ignore_ascii_case(name) || a.name.eq_ignore_ascii_case(clean)
+                })
+                .map(|a| a.managed)
+        })
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pending_upgrades_ignores_unmanaged() {
+        let cache = UpdateCache::new(vec![
+            CachedApp {
+                name: "UnmanagedApp".to_string(),
+                local_version: "1.0.0".to_string(),
+                remote_version: "2.0.0".to_string(),
+                download_url: "https://example.com/app.dmg".to_string(),
+                update_available: true,
+                managed: false,
+                sha256: None,
+            },
+            CachedApp {
+                name: "ManagedApp".to_string(),
+                local_version: "1.0.0".to_string(),
+                remote_version: "2.0.0".to_string(),
+                download_url: "https://example.com/app2.dmg".to_string(),
+                update_available: true,
+                managed: true,
+                sha256: None,
+            },
+            CachedApp {
+                name: "UpToDateApp".to_string(),
+                local_version: "2.0.0".to_string(),
+                remote_version: "2.0.0".to_string(),
+                download_url: "https://example.com/app3.dmg".to_string(),
+                update_available: false,
+                managed: true,
+                sha256: None,
+            },
+        ]);
+
+        let pending = pending_upgrades(&cache);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].name, "ManagedApp");
+    }
 }
