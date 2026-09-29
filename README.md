@@ -1,52 +1,118 @@
-# Creating a package manager to update unsigned packages #
-## Objectives ##
-- Learn some rust
-- have good info on the CLI, I like pip for example
-- dont break
-- be fast
-- easy to install
+# Rory's Package Manager (`rpm`)
 
-## Current steps ##
-- Build the checker for update check
-- Build the tool to remove apple cuaratine from unsigned apps
-- Download update, install update, and cleanup after.
-- Offer an option to revert to last update if enabled,
-	will offer to install revert to last update that is cashed.
+A fast, lightweight, and safe macOS package manager written in Rust, designed for managing, updating, and installing unsigned and custom macOS software.
 
-### Section 1. The Local Core (src/local.rs) ###
-- Task 1: Check if an .app actually exists in the /Applications
-- Task 2: Run the macOS defaults tool via Rust to extract the version string
-- Task 3: Create a custom fucntion to strip the quarantine attribute
-	$ xattr -d com.apple.quarantine
+---
 
-### Section 2. The Network Client (src/networks.rs) for local tracking data ###
-- Task 1: Create a clean wrapper for Githubs release API to fetch the latest tag
-- Task 2: Create a clean wrapper for the raw URL text files
-- Task 3: Add error bounds so for example lost internet prints friendly message instead of crashing
+## Key Features
 
-### Section 3. The State Manager (src/states.rs) ###
-- Task 1: Check for and create a dedicated confi directo at ~/.config/rorys-package-manager/
-- Task 2: Read and write a state.json file to log when an app was updated and what version to it used to be
-- Task 3: Define a cahce folder ~/.config/rorys-package-manager/cache/ to hold old .dmg or .zip files to have roll backs if enabled by user
+- **Declarative JSON Recipes (`recipes/*.json`)**: Packages are defined in simple JSON files with zero recompilation needed to add or modify apps.
+- **Smart Alias Resolution**: Install or manage apps using intuitive shortcuts (e.g. `qbt` for `qBittorrent`, `chrome` for `Chromium`).
+- **Semantic Version Checking**: Compares versions using natural SemVer ordering (`>`), distinguishing between *Up to date*, *Update available*, and *Ahead of upstream / Dev build*.
+- **Cryptographic SHA-256 Verification**: Streams incoming archives through a SHA-256 hasher during download to ensure file integrity.
+- **Running App Protection & Atomic Swaps**: Detects running applications before upgrading, requests graceful quit, and uses an atomic directory swap with automatic rollback to protect active apps from crashes or partial overwrite corruption.
+- **Pluggable Version Detection (`Livecheck`)**: Supports GitHub releases, Codeberg, Chromium Dash, raw URL manifests, and regex webpage scrapers.
+- **Multi-Container Support**: Handles `.dmg` (with automatic software license agreement acceptance), `.zip`, `.tar.gz`, and `.tar.xz` archives.
+- **Gatekeeper Quarantine Stripping**: Automatically strips Apple's `com.apple.quarantine` extended attribute on unsigned apps, with a per-package `quarantine_strip` toggle.
 
-### Section 4. The installer Engine (src/installer.rs) ###
-- Task 1: Download teh remote file (.dmg or .zip) into local cache
-- Task 2: Extract cleanly using rusts file handler
-- Task 3: Safety copy the new .app bundle into /Applications overwriting the old one without leaving corrupted files 
+---
 
-### Section 5. The CLI interface (src/main.rs) ###
-- Task 1: Parse user commands, example rpm update, rpm upgrade, rpm rollback [app]
-- Task 2: Add clean terminal color coding and error outputs that are similar to pip
+## Usage
 
+### 1. Check for Updates
+Scan all tracked recipes, query upstreams, compare versions, and refresh `local/cache.json`:
+```sh
+cargo run -- update
+```
 
-## Future changes ##
-- instead of having hard coded handlers for normalization of app version release names
-	consider having a per app config
-- instead of storing these app repos hardcoaded, should have a hashed/encrypted data file that holds locally on the machine the app names and atributes.
-	This would be a config file that users could change? if not hashed/encrypted of course.
+### 2. Upgrade Pending Applications
+Download, verify SHA-256, and install pending updates from the cache:
+```sh
+cargo run -- upgrade
+```
 
-## Wishfull thinking ##
-- Cool CLI to add your own source directories for certain platforms
-- Offer custom install option where you manually select what apps you,
-	are looking to have by default.
+### 3. Install an Application
+Install or reinstall an app by its canonical name or alias:
+```sh
+cargo run -- install qbt
+cargo run -- install chromium
+```
 
+### 4. List Tracked Recipes
+View all available recipes, aliases, and their local installation status:
+```sh
+cargo run -- list
+```
+
+### 5. Uninstall an Application
+Safely remove a managed application from `/Applications` and update cache:
+```sh
+cargo run -- uninstall qbt
+```
+
+---
+
+## Adding New Packages (JSON Recipes)
+
+To add a new application, drop a JSON recipe file into the `recipes/` directory.
+
+### Example: GitHub-Hosted App (`recipes/qbittorrent.json`)
+
+```json
+{
+  "name": "qBittorrent",
+  "aliases": ["qbittorrent", "qbt"],
+  "bundle_name": "qBittorrent.app",
+  "homepage": "https://www.qbittorrent.org",
+  "description": "BitTorrent client with a Qt user interface",
+  "quarantine_strip": true,
+  "source": {
+    "type": "github_release",
+    "locator": "qbittorrent/qBittorrent"
+  },
+  "livecheck": {
+    "strategy": "github_latest_release"
+  }
+}
+```
+
+### Example: Chromium Snapshot (`recipes/chromium.json`)
+
+```json
+{
+  "name": "Chromium",
+  "aliases": ["chromium", "chrome"],
+  "bundle_name": "Chromium.app",
+  "homepage": "https://www.chromium.org",
+  "description": "Open-source browser project",
+  "quarantine_strip": true,
+  "source": {
+    "type": "chromium_snapshot",
+    "channel": "auto"
+  },
+  "livecheck": {
+    "strategy": "raw_url",
+    "url": "https://commondatastorage.googleapis.com/chromium-browser-snapshots/Mac_Arm/LAST_CHANGE"
+  }
+}
+```
+
+For full recipe documentation and advanced options (such as regex web scrapers and custom asset filters), see [GEMINI.md](GEMINI.md).
+
+---
+
+## Architecture Overview
+
+- **`src/recipe.rs`**: JSON recipe parsing, schema validation, and alias matching.
+- **`src/version.rs`**: Semantic version parsing and ordering (`Ord`, `PartialEq`).
+- **`src/network.rs`**: Streaming SHA-256 download client and pluggable Livecheck strategies.
+- **`src/local.rs`**: `Info.plist` version inspection, `pgrep` process checking, and quarantine removal.
+- **`src/installer.rs`**: Container extraction (.dmg, .zip, .tar), bundle validation, and atomic directory swap.
+- **`src/cache.rs`**: Local state tracking (`local/cache.json`).
+- **`src/cli.rs`**: CLI command dispatch and pip-style formatted output.
+
+---
+
+## License
+
+MIT
