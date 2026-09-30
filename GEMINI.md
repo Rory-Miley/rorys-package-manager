@@ -44,6 +44,7 @@ A macOS CLI package manager (`rpm`) for **unsigned** and custom macOS apps: chec
 | `rpm cleanup [app] [-v]` | Remove cached download payloads from `local/staging/` to free disk space or clean specific apps (alias: `rpm clean`) |
 | `rpm list [-v]` | List locally installed packages and their versions (`-v` or `-verbose` for full bundle details and descriptions) |
 | `rpm list-all [-v]` | List all available recipes in catalog and installation status (`-v` or `-verbose` for full details) |
+| `rpm self-update [-v]` | Check upstream release of `rpm`, download binary, verify SHA-256, atomically swap binary in `~/.rpm/bin/rpm`, and sync recipes |
 | `rpm help` | Show usage, available commands, and tracked packages |
 
 App names and aliases are matched case-insensitively (`qbt` → `qBittorrent`, `chrome` → `Chromium`, `librewolf` → `LibreWolf`). All version outputs across all commands are standardized in square brackets `[<version>]`.
@@ -63,6 +64,28 @@ Certain applications cannot coexist safely on macOS (for example, stable `Chromi
 2. **Pre-Flight Conflict Inspection**: `cmd_install` and `install_recipe` check whether any conflicting recipe or bundle is currently installed before querying upstreams or downloading payloads.
 3. **Bidirectional Resolution**: Protects against conflicts whether declared directly on the target recipe or declared by an existing installed recipe against the incoming target.
 4. **Friendly Migration Guidance**: Aborts with clear actionable instructions showing how to uninstall the conflicting package first via `cargo run -- uninstall <app>`.
+
+### Standalone CLI & Filesystem Architecture (V0.3.0 Roadmap)
+
+To transition from running exclusively via `cargo run --` to a standalone CLI tool (`rpm <command>`):
+1. **Cargo Binary Definition**: Defines `[[bin]] name = "rpm" path = "src/main.rs"` so `cargo build` outputs `target/debug/rpm` directly.
+2. **Dual-Mode Paths Engine (`src/paths.rs`)**:
+   - **Local Dev Mode**: Automatically detected when `./recipes/` and `Cargo.toml` exist in the current working directory (or overridden by `RPM_DEV=1`/`RPM_DIR`). Uses `./recipes/`, `./local/cache.json`, and `./local/staging/`.
+   - **Installed System Mode**: When run outside the repository, uses:
+     - Binary: `~/.rpm/bin/rpm` (added to user `$PATH` in `~/.zshrc`).
+     - Persistent Recipes: `~/.rpm/recipes/*.json`.
+     - Persistent State: `~/.rpm/cache.json`.
+     - Download Cache: `~/Library/Caches/rpm/staging/` (macOS-compliant purgeable cache; auto-cleaned on disk pressure without breaking `rpm` state).
+3. **Recipe Synchronization in `rpm update`**:
+   - In installed mode, `rpm update` pulls the latest declarative recipes from GitHub into `~/.rpm/recipes/` before checking local versions, ensuring users always have up-to-date download URLs and regex rules without needing to update the binary.
+   - In dev mode, recipe auto-sync is skipped to preserve work-in-progress edits.
+4. **Native Self-Update (`rpm self-update`)**:
+   - Queries GitHub Releases for new `rpm` releases.
+   - Downloads, verifies SHA-256, and atomically replaces `~/.rpm/bin/rpm` in place.
+   - `rpm update` alerts the user with a pip/brew-style banner when a new version of `rpm` is available.
+5. **One-Liner Web Installer (`install.sh`)**:
+   - Installs via `curl -fsSL https://raw.githubusercontent.com/rorymiley/rorys-package-manager/master/install.sh | sh`.
+   - Detects architecture (`arm64` vs `x86_64`), downloads release binary, sets up `~/.rpm/`, seeds recipes, and configures `$PATH`.
 
 ---
 
@@ -332,4 +355,10 @@ Package recipes live in the `recipes/` directory as individual JSON files (`reci
     - Standard mode (`cargo run -- update`) prints a minimal check displaying `🔍 Checking <App>...` and `Local: [<ver>] ==/>/< Upstream: [<ver>]` while omitting `(Current)`, `[managed]`, `[unmanaged]`, remote download URLs, expected SHA-256 digests, and system architecture headers.
     - Verbose mode (`cargo run -- update -v` / `--verbose`) preserves full diagnostic output with system architecture, emoji badges (`✨`, `🚀`, `💎`, `⚠️`), status labels, payload URLs, expected SHA-256 hashes, and cache metadata.
     - Added immediate stdout flushing during version checks for real-time progress feedback.
+- **V0.3.0 Standalone CLI Architecture & Roadmap Scoping**:
+  - Outlined transition to a full standalone CLI package manager (`rpm <command>`) installed via `curl -fsSL ... | sh`.
+  - Defined macOS compliant storage layout separating persistent data (`~/.rpm/`) from purgeable download cache (`~/Library/Caches/rpm/staging/`).
+  - Planned dynamic dev mode resolution (`src/paths.rs`) enabling seamless dual operation between `cargo run` development and installed CLI execution.
+  - Specified upstream recipe synchronization during `rpm update` and native in-place self-updating (`rpm self-update`).
+  - Added new V0.3.0 scope to `GEMINI.md` per user approval.
 
