@@ -19,6 +19,8 @@ pub struct Recipe {
     pub quarantine_strip: bool,
     #[serde(default)]
     pub sha256: Option<String>,
+    #[serde(default, alias = "conflicts_with", alias = "conflicts", alias = "conflicting_apps")]
+    pub conflicting_applications: Vec<String>,
     pub source: SourceConfig,
     pub livecheck: LivecheckConfig,
 }
@@ -156,5 +158,32 @@ mod tests {
         assert!(recipe.matches("QBITTORRENT"));
         assert!(!recipe.matches("firefox"));
         assert!(recipe.quarantine_strip);
+        assert!(recipe.conflicting_applications.is_empty());
+    }
+
+    #[test]
+    fn test_parse_conflicting_applications() {
+        let json_a = r#"{
+            "name": "Chromium",
+            "bundle_name": "Chromium.app",
+            "conflicting_applications": ["Chromium Snapshot"],
+            "source": { "type": "chromium_snapshot" },
+            "livecheck": { "strategy": "github_latest_release" }
+        }"#;
+
+        let recipe_a: Recipe = serde_json::from_str(json_a).expect("Failed to deserialize recipe");
+        assert_eq!(recipe_a.conflicting_applications, vec!["Chromium Snapshot"]);
+
+        let json_b = r#"{
+            "name": "Chromium Snapshot",
+            "bundle_name": "Chromium Snapshot.app",
+            "conflicts_with": ["Chromium"],
+            "source": { "type": "chromium_snapshot" },
+            "livecheck": { "strategy": "github_latest_release" }
+        }"#;
+
+        let recipe_b: Recipe = serde_json::from_str(json_b).expect("Failed to deserialize recipe");
+        assert_eq!(recipe_b.conflicting_applications, vec!["Chromium"]);
     }
 }
+

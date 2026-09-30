@@ -1,9 +1,14 @@
+use crate::recipe::{Recipe, SourceConfig};
 use std::path::Path;
 use std::process::Command;
 
 /// Checks if an app exists in /Applications and extracts its version string.
-/// Checks `CFBundleShortVersionString` first, falling back to `CFBundleVersion`.
 pub fn get_local_version(bundle_name: &str) -> Option<String> {
+    get_bundle_local_version(bundle_name, false)
+}
+
+/// Checks the local version of an app bundle, taking into account whether it is a snapshot.
+pub fn get_bundle_local_version(bundle_name: &str, is_snapshot: bool) -> Option<String> {
     let clean_bundle = if bundle_name.ends_with(".app") {
         bundle_name.to_string()
     } else {
@@ -15,6 +20,23 @@ pub fn get_local_version(bundle_name: &str) -> Option<String> {
         return None;
     }
 
+    // For Chromium snapshot builds, CFBundleShortVersionString is a static milestone placeholder
+    // (e.g. "157.0.8079.0") shared across thousands of commits. The real sequential revision
+    // is stored in SCMRevision (e.g. "...@{#1707229}").
+    if is_snapshot {
+        if let Some(scm) = read_plist_key(&plist_path, "SCMRevision") {
+            if let Some(start) = scm.find("@{#") {
+                let rest = &scm[start + 3..];
+                if let Some(end) = rest.find('}') {
+                    let rev = &rest[..end];
+                    if !rev.is_empty() && rev.chars().all(|c| c.is_ascii_digit()) {
+                        return Some(rev.to_string());
+                    }
+                }
+            }
+        }
+    }
+
     // Try CFBundleShortVersionString
     if let Some(v) = read_plist_key(&plist_path, "CFBundleShortVersionString") {
         if !v.is_empty() {
@@ -24,6 +46,12 @@ pub fn get_local_version(bundle_name: &str) -> Option<String> {
 
     // Fallback to CFBundleVersion
     read_plist_key(&plist_path, "CFBundleVersion")
+}
+
+/// Helper extracting local version based on recipe configuration (e.g. snapshots).
+pub fn get_recipe_local_version(recipe: &Recipe) -> Option<String> {
+    let is_snapshot = matches!(recipe.source, SourceConfig::ChromiumSnapshot { .. });
+    get_bundle_local_version(&recipe.bundle_name, is_snapshot)
 }
 
 fn read_plist_key(plist_path: &str, key: &str) -> Option<String> {

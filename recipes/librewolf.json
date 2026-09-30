@@ -7,15 +7,13 @@
   ],
   "bundle_name": "LibreWolf.app",
   "homepage": "https://www.librewolf.net",
-  "description": "Open-source browser project",
+  "description": "Custom Firefox-focused open-source browser project",
   "quarantine_strip": true,
   "source": {
     "type": "codeberg_release",
-    "locator": "librewolf/bsys6",
-    "channel": "auto"
+    "locator": "librewolf/bsys6"
   },
   "livecheck": {
-    "strategy": "raw_url",
-    "url": "https://librewolf.dev/librewolf/bsys6/releases"
+    "strategy": "codeberg_latest_release"
   }
 }

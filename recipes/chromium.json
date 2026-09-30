@@ -5,15 +5,17 @@
     "chrome"
   ],
   "bundle_name": "Chromium.app",
-  "homepage": "https://www.chromium.org",
-  "description": "Open-source browser project",
+  "homepage": "https://github.com/ungoogled-software/ungoogled-chromium-macos",
+  "description": "Privacy-focused stable open-source Chromium browser",
   "quarantine_strip": true,
+  "conflicting_applications": [
+    "Chromium Snapshot"
+  ],
   "source": {
-    "type": "chromium_snapshot",
-    "channel": "auto"
+    "type": "github_release",
+    "locator": "ungoogled-software/ungoogled-chromium-macos"
   },
   "livecheck": {
-    "strategy": "raw_url",
-    "url": "https://commondatastorage.googleapis.com/chromium-browser-snapshots/Mac_Arm/LAST_CHANGE"
+    "strategy": "github_latest_release"
   }
 }

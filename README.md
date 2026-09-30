@@ -25,6 +25,7 @@ Macbook M3 Pro
 - **Pluggable Version Detection (`Livecheck`)**: Supports GitHub releases, Codeberg, Chromium Dash, raw URL manifests, and regex webpage scrapers.
 - **Multi-Container Support**: Handles `.dmg` (with automatic software license agreement acceptance), `.zip`, `.tar.gz`, and `.tar.xz` archives.
 - **Gatekeeper Quarantine Stripping**: Automatically strips Apple's `com.apple.quarantine` extended attribute on unsigned apps, with a per-package `quarantine_strip` toggle.
+- **Package Conflict & Compatibility Protection**: Prevents installing incompatible or mutually exclusive applications (e.g. stable `Chromium` vs bleeding-edge `Chromium Snapshot`) via `conflicting_applications` recipe tags.
 - **Unmanaged Application Protection (Homebrew-Inspired)**: Refuses to overwrite or automatically update existing applications in `/Applications` that were not installed through `rpm`. Protects external or manual installs from unintended modification and provides clear migration instructions.
 
 ---
@@ -32,11 +33,11 @@ Macbook M3 Pro
 ## Usage
 
 ### 1. Check for Updates
-Scan all tracked recipes, query upstreams, compare versions, and refresh `local/cache.json`:
+Scan currently installed applications, query upstreams, compare versions, and refresh `local/cache.json`:
 ```sh
 cargo run -- update
 ```
-*(Unmanaged applications installed outside `rpm` are flagged with a notice and skipped from automatic update queues).*
+*(Only checks packages currently installed on your machine. Unmanaged applications installed outside `rpm` are flagged with a notice and skipped from automatic update queues).*
 
 ### 2. Upgrade Pending Applications
 Download, verify SHA-256, and install pending updates from the cache (only manages `rpm`-tracked apps):
@@ -49,16 +50,31 @@ Install or reinstall an app by its canonical name or alias:
 ```sh
 cargo run -- install qbt
 cargo run -- install chromium
+cargo run -- install librewolf
 ```
 > **Security Note:** If an application is already present under `/Applications` but was **not installed by `rpm`** (unmanaged), `rpm` refuses to overwrite it to preserve system integrity. To manage it with `rpm`, uninstall or remove the existing `.app` bundle first, then run `install`.
 
-### 4. List Tracked Recipes
-View all available recipes, aliases, and their local installation status (`Installed [managed]`, `Installed [unmanaged]`, or `Not Installed`):
+### 4. List Installed Applications
+View currently installed packages and their versions:
 ```sh
 cargo run -- list
 ```
+Pass `-v` or `-verbose` to view detailed verbose information (aliases, bundle name, management status badge, and description):
+```sh
+cargo run -- list -v
+```
 
-### 5. Uninstall an Application
+### 5. List All Available Packages
+View all available recipes in the catalog that you can install:
+```sh
+cargo run -- list-all
+```
+Pass `-v` or `-verbose` for detailed package information:
+```sh
+cargo run -- list-all -v
+```
+
+### 6. Uninstall an Application
 Safely remove a managed application from `/Applications` and update cache:
 ```sh
 cargo run -- uninstall qbt
@@ -90,16 +106,40 @@ To add a new application, drop a JSON recipe file into the `recipes/` directory.
 }
 ```
 
-### Example: Chromium Snapshot (`recipes/chromium.json`)
+### Example: Conflicting Packages (`recipes/chromium.json` & `recipes/chromium-snapshot.json`)
 
 ```json
 {
   "name": "Chromium",
   "aliases": ["chromium", "chrome"],
   "bundle_name": "Chromium.app",
-  "homepage": "https://www.chromium.org",
-  "description": "Open-source browser project",
+  "homepage": "https://github.com/ungoogled-software/ungoogled-chromium-macos",
+  "description": "Privacy-focused stable open-source Chromium browser",
   "quarantine_strip": true,
+  "conflicting_applications": [
+    "Chromium Snapshot"
+  ],
+  "source": {
+    "type": "github_release",
+    "locator": "ungoogled-software/ungoogled-chromium-macos"
+  },
+  "livecheck": {
+    "strategy": "github_latest_release"
+  }
+}
+```
+
+```json
+{
+  "name": "Chromium Snapshot",
+  "aliases": ["chromium-snapshot", "chrome-snapshot"],
+  "bundle_name": "Chromium Snapshot.app",
+  "homepage": "https://www.chromium.org",
+  "description": "Continuous bleeding-edge snapshot build of Chromium",
+  "quarantine_strip": true,
+  "conflicting_applications": [
+    "Chromium"
+  ],
   "source": {
     "type": "chromium_snapshot",
     "channel": "auto"
@@ -117,19 +157,19 @@ For full recipe documentation and advanced options (such as regex web scrapers a
 
 ## Architecture Overview
 
-- **`src/recipe.rs`**: JSON recipe parsing, schema validation, and alias matching.
+- **`src/recipe.rs`**: JSON recipe parsing, schema validation, `conflicting_applications` parsing, and alias matching.
 - **`src/version.rs`**: Semantic version parsing and ordering (`Ord`, `PartialEq`).
 - **`src/network.rs`**: Streaming SHA-256 download client and pluggable Livecheck strategies.
 - **`src/local.rs`**: `Info.plist` version inspection, `pgrep` process checking, and quarantine removal.
-- **`src/installer.rs`**: Container extraction (.dmg, .zip, .tar), bundle validation, atomic directory swap, and unmanaged bundle guards.
+- **`src/installer.rs`**: Container extraction (.dmg, .zip, .tar), bundle validation, atomic directory swap, unmanaged bundle guards, and conflict prevention.
 - **`src/cache.rs`**: Local state tracking (`local/cache.json`) and `pending_upgrades` filtering for managed apps.
-- **`src/cli.rs`**: CLI command dispatch, unmanaged app protection warnings, and pip-style formatted output.
+- **`src/cli.rs`**: CLI command dispatch, unmanaged app protection warnings, conflict checking, and pip-style formatted output.
 
 ---
 
 ## To Do
 
-- URGENT: Fix bug with librewolf receipe and network.rs, When trying to download the package from codeberg, it finds the arm linux version and downloads that. This is obviously wrong, and i am pretty sure i know why. The version check looks for arm as apple silicon is arm. We should maybe ensure we exclude packages that have linux in their name, and put priority on .dmg files over tar files. Thats my bad lol. Get to this next time.
+- [x] ~~**Fixed**: LibreWolf recipe & network.rs macOS binary resolution~~ (Resolved: strict non-macOS binary filtering and preference for `.dmg` > `.zip` > `.tar.*`).
 
 - Improve the download UI. Make the download UI (when updating apps and downloading that update, or installing an app for the first time) show a pip style download bar. This bar should scale with the the size of the CLI window so that it doesn't go to a new line when the window is dynamically resized. The bar will be a grey outline with a 50% opacity so that it roughly matches the background colour of the CLI it is open in. I want the progress on this bar to represented by an Orange bar. On the left of the bar it should have the % that has so far be downloaded. Additionally, to the right of the bar, I want a downloaded/total MB counter to represent the progress.
 

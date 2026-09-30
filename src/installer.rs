@@ -53,7 +53,7 @@ pub fn upgrade_pending() -> Result<usize, String> {
         }
 
         println!(
-            "\x1b[1;34m==>\x1b[0m Upgrading \x1b[1m{}\x1b[0m ({} → {})",
+            "\x1b[1;34m==>\x1b[0m Upgrading \x1b[1m{}\x1b[0m ([{}] → [{}])",
             app.name, app.local_version, app.remote_version
         );
 
@@ -109,12 +109,106 @@ pub fn upgrade_pending() -> Result<usize, String> {
     Ok(upgraded)
 }
 
+/// Compatibility handler: Checks if any application conflicting with `recipe` is currently installed.
+/// Returns an error if an installed conflicting application is found.
+pub fn check_conflicting_apps(recipe: &Recipe, recipes: &[Recipe]) -> Result<(), String> {
+    // 1. Direct conflicts listed in this recipe's configuration
+    for conflict in &recipe.conflicting_applications {
+        if let Some(err) = check_one_conflict(recipe, conflict, recipes) {
+            return Err(err);
+        }
+    }
+
+    // 2. Bidirectional conflicts: check if any already-installed recipe conflicts with this recipe
+    for other in recipes {
+        if other.name.eq_ignore_ascii_case(&recipe.name) {
+            continue;
+        }
+        let conflicts_with_this = other.conflicting_applications.iter().any(|c| {
+            recipe.matches(c) || c.eq_ignore_ascii_case(&recipe.bundle_name)
+        });
+        if conflicts_with_this {
+            let other_installed = local::get_recipe_local_version(other).is_some()
+                || other.app_path().exists();
+            if other_installed {
+                let clean_bundle = if other.bundle_name.ends_with(".app") {
+                    other.bundle_name.clone()
+                } else {
+                    format!("{}.app", other.bundle_name)
+                };
+                let is_managed = cache::was_managed(&other.name);
+                let uninstall_hint = if is_managed {
+                    let alias = other.aliases.first().map(|s| s.as_str()).unwrap_or(&other.name);
+                    format!("To resolve this, uninstall it first:\n  cargo run -- uninstall {}", alias)
+                } else {
+                    format!("To resolve this, remove it first:\n  rm -rf '/Applications/{}'", clean_bundle)
+                };
+                return Err(format!(
+                    "Cannot install '{}' because conflicting application '{}' is currently installed at /Applications/{}.\n{}",
+                    recipe.name, other.name, clean_bundle, uninstall_hint
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn check_one_conflict(recipe: &Recipe, conflict: &str, recipes: &[Recipe]) -> Option<String> {
+    if let Some(target_recipe) = recipe::find_recipe(conflict, recipes) {
+        let is_installed = local::get_recipe_local_version(target_recipe).is_some()
+            || target_recipe.app_path().exists();
+        if is_installed {
+            let clean_bundle = if target_recipe.bundle_name.ends_with(".app") {
+                target_recipe.bundle_name.clone()
+            } else {
+                format!("{}.app", target_recipe.bundle_name)
+            };
+            let is_managed = cache::was_managed(&target_recipe.name);
+            let uninstall_hint = if is_managed {
+                let alias = target_recipe.aliases.first().map(|s| s.as_str()).unwrap_or(&target_recipe.name);
+                format!("To resolve this, uninstall it first:\n  cargo run -- uninstall {}", alias)
+            } else {
+                format!("To resolve this, remove it first:\n  rm -rf '/Applications/{}'", clean_bundle)
+            };
+            return Some(format!(
+                "Cannot install '{}' because conflicting application '{}' is currently installed at /Applications/{}.\n{}",
+                recipe.name, target_recipe.name, clean_bundle, uninstall_hint
+            ));
+        }
+    } else {
+        // Not a known recipe name: check if bundle or app exists directly in /Applications
+        let clean_bundle = if conflict.ends_with(".app") {
+            conflict.to_string()
+        } else {
+            format!("{}.app", conflict)
+        };
+        let target_path = PathBuf::from(format!("/Applications/{}", clean_bundle));
+        if target_path.exists() {
+            let is_managed = cache::was_managed(conflict) || cache::was_managed(&clean_bundle);
+            let uninstall_hint = if is_managed {
+                format!("To resolve this, uninstall it first:\n  cargo run -- uninstall {}", conflict)
+            } else {
+                format!("To resolve this, remove it first:\n  rm -rf '/Applications/{}'", clean_bundle)
+            };
+            return Some(format!(
+                "Cannot install '{}' because conflicting application '{}' is currently installed at /Applications/{}.\n{}",
+                recipe.name, conflict, clean_bundle, uninstall_hint
+            ));
+        }
+    }
+    None
+}
+
 /// Install one app by Recipe configuration.
 pub fn install_recipe(
     recipe: &Recipe,
     remote_version: &str,
     download_url: &str,
 ) -> Result<(), String> {
+    let all_recipes = recipe::load_recipes().unwrap_or_default();
+    check_conflicting_apps(recipe, &all_recipes)?;
+
     let clean_bundle = if recipe.bundle_name.ends_with(".app") {
         recipe.bundle_name.clone()
     } else {
@@ -139,7 +233,7 @@ pub fn install_recipe(
     }
 
     println!(
-        "\x1b[1;34m==>\x1b[0m Installing \x1b[1m{}\x1b[0m ({})",
+        "\x1b[1;34m==>\x1b[0m Installing \x1b[1m{}\x1b[0m ([{}])",
         recipe.name, remote_version
     );
 
@@ -153,7 +247,7 @@ pub fn install_recipe(
     )?;
 
     let local_version =
-        local::get_local_version(&recipe.bundle_name).unwrap_or_else(|| remote_version.to_string());
+        local::get_recipe_local_version(recipe).unwrap_or_else(|| remote_version.to_string());
 
     mark_managed(
         &recipe.name,
@@ -184,7 +278,7 @@ pub fn install_app(
 
     let bundle_name = format!("{}.app", name);
     println!(
-        "\x1b[1;34m==>\x1b[0m Installing \x1b[1m{}\x1b[0m ({})",
+        "\x1b[1;34m==>\x1b[0m Installing \x1b[1m{}\x1b[0m ([{}])",
         name, remote_version
     );
 
@@ -743,3 +837,46 @@ fn mark_managed(
     });
     cache::save_cache(&cache)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::recipe::{LivecheckConfig, SourceConfig};
+
+    fn make_test_recipe(name: &str, bundle: &str, conflicts: Vec<&str>) -> Recipe {
+        Recipe {
+            name: name.to_string(),
+            aliases: vec![name.to_lowercase()],
+            bundle_name: bundle.to_string(),
+            homepage: None,
+            description: None,
+            quarantine_strip: true,
+            sha256: None,
+            conflicting_applications: conflicts.into_iter().map(String::from).collect(),
+            source: SourceConfig::ChromiumSnapshot {
+                channel: "Mac_Arm".to_string(),
+            },
+            livecheck: LivecheckConfig::GithubLatestRelease,
+        }
+    }
+
+    #[test]
+    fn test_check_conflicts_no_conflicts() {
+        let r1 = make_test_recipe("AppA", "AppA_NonExistent_12345.app", vec![]);
+        let r2 = make_test_recipe("AppB", "AppB_NonExistent_12345.app", vec![]);
+        let recipes = vec![r1.clone(), r2];
+
+        assert!(check_conflicting_apps(&r1, &recipes).is_ok());
+    }
+
+    #[test]
+    fn test_check_conflicts_uninstalled_target() {
+        let r1 = make_test_recipe("AppA", "AppA_NonExistent_12345.app", vec!["AppB"]);
+        let r2 = make_test_recipe("AppB", "AppB_NonExistent_12345.app", vec!["AppA"]);
+        let recipes = vec![r1.clone(), r2];
+
+        // Neither is installed in /Applications, so no conflict error
+        assert!(check_conflicting_apps(&r1, &recipes).is_ok());
+    }
+}
+

@@ -147,52 +147,151 @@ where
         }
     }
 
-    // 2. Standard heuristic matching: check for macOS container + architecture keywords
-    let arch_match = assets.iter().find(|(name, _)| {
+    // 2. Filter candidate assets and score them based on macOS suitability, architecture, and container type
+    let mut candidates: Vec<(i32, &str)> = Vec::new();
+
+    for (name, url) in &assets {
         let name_lower = name.to_lowercase();
-        let is_mac_file = name_lower.ends_with(".dmg")
-            || name_lower.ends_with(".zip")
-            || name_lower.ends_with(".tar.gz")
+
+        // Exclude non-package extensions (checksums, signatures, metadata, etc.)
+        let is_non_package = name_lower.ends_with(".sha256sum")
+            || name_lower.ends_with(".sha256")
+            || name_lower.ends_with(".sha512")
+            || name_lower.ends_with(".sig")
+            || name_lower.ends_with(".asc")
+            || name_lower.ends_with(".txt")
+            || name_lower.ends_with(".json")
+            || name_lower.ends_with(".blockmap")
+            || name_lower.ends_with(".zsync")
+            || name_lower.ends_with(".sbom");
+        if is_non_package {
+            continue;
+        }
+
+        // Exclude non-macOS target OSes (Linux, Windows, Android, BSDs)
+        let is_windows = name_lower.contains("windows")
+            || name_lower.contains("win32")
+            || name_lower.contains("win64")
+            || name_lower.ends_with(".exe")
+            || name_lower.ends_with(".msi")
+            || name_lower.ends_with(".msix")
+            || name_lower.contains("-win-")
+            || name_lower.contains("-win_")
+            || name_lower.contains("_win_")
+            || name_lower.contains("-win.")
+            || name_lower.contains("_win.");
+
+        let is_other_os = name_lower.contains("linux")
+            || is_windows
+            || name_lower.contains("android")
+            || name_lower.contains("freebsd")
+            || name_lower.contains("openbsd")
+            || name_lower.contains("netbsd")
+            || name_lower.ends_with(".deb")
+            || name_lower.ends_with(".rpm")
+            || name_lower.ends_with(".appimage")
+            || name_lower.ends_with(".apk");
+        if is_other_os {
+            continue;
+        }
+
+        // Identify archive / container types
+        let is_dmg = name_lower.ends_with(".dmg");
+        let is_pkg = name_lower.ends_with(".pkg");
+        let is_zip = name_lower.ends_with(".zip");
+        let is_tar = name_lower.ends_with(".tar.gz")
             || name_lower.ends_with(".tar.xz")
-            || name_lower.contains("mac")
+            || name_lower.ends_with(".tgz")
+            || name_lower.ends_with(".tar.bz2")
+            || name_lower.ends_with(".tbz2");
+
+        if !(is_dmg || is_pkg || is_zip || is_tar) {
+            continue;
+        }
+
+        // Check for explicit macOS indicators
+        let has_mac_indicator = is_dmg
             || name_lower.contains("macos")
             || name_lower.contains("darwin")
-            || name_lower.contains("osx");
+            || name_lower.contains("osx")
+            || name_lower.contains("apple")
+            || (name_lower.contains("mac") && !name_lower.contains("machine"));
 
-        let matches_arch = if current_arch == "arm64" {
-            name_lower.contains("arm64")
-                || name_lower.contains("aarch64")
-                || name_lower.contains("apple-silicon")
-                || name_lower.contains("m1")
-        } else {
-            name_lower.contains("x86_64")
-                || name_lower.contains("intel")
-                || name_lower.contains("x64")
-                || name_lower.contains("amd64")
-        };
+        // Tarballs MUST have an explicit macOS keyword; generic tarballs are usually source or Linux builds
+        if is_tar && !has_mac_indicator {
+            continue;
+        }
+
+        // Architecture detection & compatibility checks
+        let is_arm64_indicator = name_lower.contains("arm64")
+            || name_lower.contains("aarch64")
+            || name_lower.contains("apple-silicon")
+            || name_lower.contains("m1")
+            || name_lower.contains("m2")
+            || name_lower.contains("m3");
+
+        let is_x86_indicator = name_lower.contains("x86_64")
+            || name_lower.contains("intel")
+            || name_lower.contains("amd64")
+            || name_lower.contains("x64");
 
         let is_universal = name_lower.contains("universal");
-        is_mac_file && (matches_arch || is_universal)
-    });
 
-    if let Some((_, url)) = arch_match {
-        return Ok(url.to_string());
+        let (matches_arch, is_incompatible) = if current_arch == "arm64" {
+            let matches = is_arm64_indicator || is_universal;
+            let incompatible = is_x86_indicator && !is_universal && !is_arm64_indicator;
+            (matches, incompatible)
+        } else {
+            let matches = is_x86_indicator || is_universal;
+            let incompatible = is_arm64_indicator && !is_universal && !is_x86_indicator;
+            (matches, incompatible)
+        };
+
+        if is_incompatible {
+            continue;
+        }
+
+        // Calculate match quality score
+        let mut score = 0;
+
+        // Architecture scoring: specific > universal > unspecified
+        if matches_arch {
+            if is_universal {
+                score += 200;
+            } else {
+                score += 300;
+            }
+        } else {
+            score += 100;
+        }
+
+        // Container scoring: prioritize .dmg over .zip, and .zip over .tar
+        if is_dmg {
+            score += 60;
+        } else if is_zip && has_mac_indicator {
+            score += 40;
+        } else if is_pkg {
+            score += 30;
+        } else if is_zip {
+            score += 20;
+        } else if is_tar && has_mac_indicator {
+            score += 10;
+        }
+
+        candidates.push((score, url));
     }
 
-    // 3. Fallback: any .dmg or .zip if no arch-specific asset was found
-    assets
-        .iter()
-        .find(|(name, _)| {
-            let n = name.to_lowercase();
-            n.ends_with(".dmg") || n.ends_with(".zip")
-        })
-        .map(|(_, url)| url.to_string())
-        .ok_or_else(|| {
-            format!(
-                "Could not find a valid macOS binary asset in repo: {}",
-                repo
-            )
-        })
+    // Sort by score descending
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+
+    if let Some((_, url)) = candidates.first() {
+        Ok(url.to_string())
+    } else {
+        Err(format!(
+            "Could not find a valid macOS binary asset in repo: {}",
+            repo
+        ))
+    }
 }
 
 /// Queries GitHub Releases for the latest release that includes a matching macOS download URL.
@@ -459,3 +558,62 @@ pub fn download_file_with_hash(
 pub fn download_file(url: &str, destination_path: &Path) -> Result<(), String> {
     download_file_with_hash(url, destination_path, None).map(|_| ())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pick_mac_download_url_librewolf_codeberg() {
+        let assets = vec![
+            ("librewolf-156.0.1-1-linux-arm64-appimage.AppImage", "https://example.com/appimage"),
+            ("librewolf-156.0.1-1-linux-arm64-deb.deb", "https://example.com/deb"),
+            ("librewolf-156.0.1-1-linux-arm64-package.tar.xz", "https://example.com/linux-arm64-tar"),
+            ("librewolf-156.0.1-1-linux-x86_64-package.tar.xz", "https://example.com/linux-x86-tar"),
+            ("librewolf-156.0.1-1-macos-arm64-package.dmg", "https://example.com/macos-arm64-dmg"),
+            ("librewolf-156.0.1-1-macos-x86_64-package.dmg", "https://example.com/macos-x86-dmg"),
+            ("librewolf-156.0.1-1-windows-arm64-package.zip", "https://example.com/win-zip"),
+            ("sha256sums.txt", "https://example.com/sha256sums"),
+        ];
+
+        let result = pick_mac_download_url(assets, "librewolf/bsys6", None);
+        assert!(result.is_ok());
+        let selected_url = result.unwrap();
+
+        if detect_mac_architecture() == "arm64" {
+            assert_eq!(selected_url, "https://example.com/macos-arm64-dmg");
+        } else {
+            assert_eq!(selected_url, "https://example.com/macos-x86-dmg");
+        }
+    }
+
+    #[test]
+    fn test_pick_mac_download_url_rejects_generic_tarballs() {
+        let assets = vec![
+            ("qbittorrent-5.2.4.tar.xz", "https://example.com/source.tar.xz"),
+            ("qbittorrent-5.2.4.tar.xz.asc", "https://example.com/source.tar.xz.asc"),
+            ("qbittorrent-5.2.4_x86_64.AppImage", "https://example.com/appimage"),
+        ];
+
+        let result = pick_mac_download_url(assets, "qbittorrent/qBittorrent", None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pick_mac_download_url_prefers_dmg_over_zip_and_tar() {
+        let current_arch = detect_mac_architecture();
+        let dmg_name = format!("app-macos-{}.dmg", current_arch);
+        let zip_name = format!("app-macos-{}.zip", current_arch);
+        let tar_name = format!("app-macos-{}.tar.gz", current_arch);
+
+        let assets = vec![
+            (tar_name.as_str(), "https://example.com/app.tar.gz"),
+            (zip_name.as_str(), "https://example.com/app.zip"),
+            (dmg_name.as_str(), "https://example.com/app.dmg"),
+        ];
+
+        let result = pick_mac_download_url(assets, "owner/repo", None);
+        assert_eq!(result.unwrap(), "https://example.com/app.dmg");
+    }
+}
+

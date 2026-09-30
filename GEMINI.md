@@ -37,22 +37,31 @@ A macOS CLI package manager (`rpm`) for **unsigned** and custom macOS apps: chec
 
 | Command | Behavior |
 |---|---|
-| `rpm update` | Scan recipes in `recipes/`, check versions; skip updates for unmanaged apps; write `local/cache.json` |
+| `rpm update` | Scan locally installed apps, check upstream versions; skip updates for unmanaged apps; write `local/cache.json` |
 | `rpm upgrade` | Read cache, download, verify SHA-256, and install pending **managed** apps |
-| `rpm install <app>` | Resolve recipe; refuse if target exists but is unmanaged; install atomically and mark `managed` |
+| `rpm install <app>` | Resolve recipe; check compatibility conflicts; refuse if target exists but is unmanaged; install atomically and mark `managed` |
 | `rpm uninstall <app>` | Safely remove a **managed** app from `/Applications` and clear `managed` in cache |
-| `rpm list` | List all tracked recipes, aliases, and status (`Installed [managed]`, `Installed [unmanaged]`, `Not Installed`) |
+| `rpm list [-v]` | List locally installed packages and their versions (`-v` or `-verbose` for full bundle details and descriptions) |
+| `rpm list-all [-v]` | List all available recipes in catalog and installation status (`-v` or `-verbose` for full details) |
 | `rpm help` | Show usage, available commands, and tracked packages |
 
-App names and aliases are matched case-insensitively (`qbt` → `qBittorrent`, `chrome` → `Chromium`).
+App names and aliases are matched case-insensitively (`qbt` → `qBittorrent`, `chrome` → `Chromium`, `librewolf` → `LibreWolf`). All version outputs across all commands are standardized in square brackets `[<version>]`.
 
 ### Unmanaged Package Security Policy (Homebrew-Inspired)
 
 To preserve user data and system integrity, `rpm` treats any application in `/Applications` not installed by `rpm` as **unmanaged**:
 1. **`rpm install <app>`**: If `/Applications/<bundle_name>` exists and is not managed by `rpm`, the installation aborts immediately with an explanatory error instructing the user to remove/uninstall the existing application first if they wish to manage it via `rpm`.
-2. **`rpm update`**: Remote checks run, but unmanaged installed applications are never flagged with `update_available: true`. Guidance is printed to the console explaining how to switch to `rpm`.
+2. **`rpm update`**: Remote checks run on installed packages, but unmanaged installed applications are never flagged with `update_available: true`. Guidance is printed to the console explaining how to switch to `rpm`.
 3. **`rpm upgrade`**: Only upgrades apps where `managed: true`.
 4. **Installer pipelines**: `install_recipe`, `install_bundle_pipeline`, and `install_app_bundle_atomic` perform defense-in-depth checks preventing overwriting unmanaged bundles.
+
+### Mutual Package Conflict & Compatibility Protection
+
+Certain applications cannot coexist safely on macOS (for example, stable `Chromium` and bleeding-edge continuous `Chromium Snapshot`):
+1. **Recipe Declarations**: Packages declare mutually exclusive software via the optional `conflicting_applications` array (accepts aliases `conflicts_with`, `conflicts`, `conflicting_apps`).
+2. **Pre-Flight Conflict Inspection**: `cmd_install` and `install_recipe` check whether any conflicting recipe or bundle is currently installed before querying upstreams or downloading payloads.
+3. **Bidirectional Resolution**: Protects against conflicts whether declared directly on the target recipe or declared by an existing installed recipe against the incoming target.
+4. **Friendly Migration Guidance**: Aborts with clear actionable instructions showing how to uninstall the conflicting package first via `cargo run -- uninstall <app>`.
 
 ---
 
@@ -71,6 +80,7 @@ Package recipes live in the `recipes/` directory as individual JSON files (`reci
   "description": "Short description of the software",
   "quarantine_strip": true,
   "sha256": "optional_expected_sha256_hash",
+  "conflicting_applications": ["ConflictingAppOrAlias"],
   "source": {
     "type": "github_release | codeberg_release | chromium_snapshot | direct_url",
     "locator": "owner/repository",
@@ -100,12 +110,13 @@ Package recipes live in the `recipes/` directory as individual JSON files (`reci
    - `true`: Runs `xattr -dr com.apple.quarantine` on the staged bundle (essential for unsigned third-party software).
    - `false`: Leaves quarantine untouched (useful for signed/notarized packages).
 7. **`sha256`** *(String, optional)*: Expected SHA-256 hash. If provided, the installer strictly verifies the download against this hash before mounting or staging.
-8. **`source`** *(Object, required)*:
+8. **`conflicting_applications`** *(Array of Strings, optional)*: Canonical names, aliases, or bundle names of applications that cannot be installed alongside this package (e.g. `["Chromium Snapshot"]`). Supports aliases: `conflicts_with`, `conflicts`, `conflicting_apps`.
+9. **`source`** *(Object, required)*:
    - **`github_release`**: GitHub repository (`locator: "owner/repo"`). Automatically scans recent releases for valid macOS containers (`.dmg`, `.zip`, `.tar.gz`, `.tar.xz`). Supports optional regex `asset_filter`.
    - **`codeberg_release`**: Codeberg/Gitea repository (`locator: "owner/repo"`).
    - **`chromium_snapshot`**: Downloads snapshot zip from Google storage buckets (`channel: "auto"` selects `Mac_Arm` or `Mac`).
    - **`direct_url`**: Formats a download URL using `{version}` and `{arch}` tokens (e.g. `url_template: "https://example.com/v{version}/App-{arch}.dmg"`).
-9. **`livecheck`** *(Object, required)*:
+10. **`livecheck`** *(Object, required)*:
    - **`github_latest_release`**: Queries GitHub API.
    - **`codeberg_latest_release`**: Queries Codeberg API.
    - **`chromium_dash`**: Queries Chromium Dash release endpoint with `channel` (`"Stable"`, `"Beta"`, `"Dev"`, `"Canary"`).
@@ -182,6 +193,7 @@ Package recipes live in the `recipes/` directory as individual JSON files (`reci
 ### 1. Recipe Loader — `src/recipe.rs`
 - Defines `Recipe`, `SourceConfig`, `LivecheckConfig`.
 - Loads and parses all JSON manifests under `recipes/`.
+- Supports `conflicting_applications` with serde aliases (`conflicts_with`, `conflicts`, `conflicting_apps`).
 - Resolves aliases case-insensitively.
 
 ### 2. Version Engine — `src/version.rs`
@@ -193,10 +205,11 @@ Package recipes live in the `recipes/` directory as individual JSON files (`reci
 - Single-pass download streaming with SHA-256 calculation (`sha2` crate).
 - Pluggable livecheck resolver (GitHub, Codeberg, Chromium Dash, raw URLs, regex scraping).
 - Architecture detection (`arm64` vs `x86_64`) and multi-container asset filtering (`.dmg`, `.zip`, `.tar.gz`, `.tar.xz`).
+- Robust scoring prioritizing `.dmg` > `.zip` > `.tar.*` while strictly filtering out Linux, Windows, AppImage, and Debian packages.
 - Scans recent releases to find the latest valid macOS build even if a release tag omitted macOS binaries.
 
 ### 4. Local Core & Process Management — `src/local.rs`
-- Reads version from `/Applications/<bundle_name>/Contents/Info.plist` (supporting `CFBundleShortVersionString` and `CFBundleVersion`).
+- Reads version from `/Applications/<bundle_name>/Contents/Info.plist` (supporting `CFBundleShortVersionString`, `CFBundleVersion`, and snapshot `SCMRevision` commit positions).
 - Active process detection via `pgrep` to prevent modifying active executables in place.
 - Graceful shutdown requests via AppleScript (`osascript`).
 - Structural bundle validation (`validate_app_bundle` checking `Contents/Info.plist` and `Contents/MacOS`).
@@ -207,6 +220,8 @@ Package recipes live in the `recipes/` directory as individual JSON files (`reci
   - Unattended DMG mounting (`hdiutil attach` with `-nobrowse`, `-readonly`, `-noverify`, and piped license acceptance).
   - ZIP extraction (`ditto -x -k`).
   - TAR extraction (`tar -xzf`, `tar -xJf`).
+- **Compatibility & Conflict Handler**:
+  - `check_conflicting_apps`: Verifies that no mutually exclusive applications or bundles are currently installed before installation begins.
 - **Atomic Swap Protocol**:
   1. Detects running app and warns/prompts.
   2. Renames existing `/Applications/<bundle_name>` to `.rpm-backup-<timestamp>`.
@@ -222,9 +237,11 @@ Package recipes live in the `recipes/` directory as individual JSON files (`reci
 - `was_managed`: Helper checking if an app was previously installed by `rpm`.
 
 ### 7. CLI Dispatch — `src/cli.rs` + thin `src/main.rs`
-- Commands: `update`, `upgrade`, `install`, `uninstall`, `list`, `help`.
-- Formatted output with color badges for update states, download URLs, and verified checksums.
-- Clear distinction between `Installed [managed]` and `Installed [unmanaged]`.
+- Commands: `update`, `upgrade`, `install`, `uninstall`, `list`, `list-all`, `help`.
+- Standardized bracketed version formatting `[<version>]` across all commands.
+- `list` only lists installed packages; `list-all` lists the complete recipe catalog.
+- Supports `-v` / `-verbose` for detailed inspection.
+- Pre-flight conflict rejection in `cmd_install` aborting incompatible installations before network operations.
 - Rejection of installs targeting unmanaged existing applications, presenting clear migration steps.
 
 ---
@@ -245,7 +262,6 @@ Package recipes live in the `recipes/` directory as individual JSON files (`reci
   - Completed Chromium handler natively via `recipes/chromium.json` and snapshot archives.
   - Implemented active process detection (`pgrep`), graceful quit, and atomic directory swap in `src/installer.rs`.
   - Added support for `.tar.gz` and `.tar.xz` archives, and automated DMG license agreement bypassing.
-  - Added `rpm list` command.
   - Cleaned up compiler warnings, verified all unit tests pass, and pushed changes to `origin/master`.
 - **Unmanaged Package Protection (Homebrew Cask Integrity Pattern)**:
   - Analyzed Homebrew Cask collision handling (`moved.rb`).
@@ -253,3 +269,19 @@ Package recipes live in the `recipes/` directory as individual JSON files (`reci
   - Enforced refusal to overwrite or automatically update unmanaged existing applications in `/Applications`.
   - Provided user-friendly error messages instructing how to uninstall outside `rpm` and reinstall via `cargo run -- install <app>`.
   - Enhanced `rpm list` to show `[unmanaged]` vs `[managed]` status badges.
+- **LibreWolf Recipe Addition & macOS Binary Resolution Fix**:
+  - Added recipe for LibreWolf browser (`recipes/librewolf.json`) tracking releases from Codeberg (`librewolf/bsys6`).
+  - Enhanced `pick_mac_download_url` in `src/network.rs` with strict non-macOS filtering (excluding AppImage, deb, rpm, and Windows packages) and scoring prioritizing `.dmg` > `.zip` > `.tar.*`. Added unit tests.
+- **CLI Clean-up & List/List-all Separation**:
+  - `rpm list` now lists only installed packages in clean `• Name [version]` format, with `-v` or `-verbose` for full details.
+  - Added `rpm list-all` to inspect the entire available recipe catalog.
+  - `rpm update` scans only locally installed packages instead of uninstalled catalog recipes.
+  - Standardized all version numbers inside square brackets `[...]` across `list`, `list-all`, `update`, `upgrade`, and `install`.
+- **Chromium Snapshot vs Stable Chromium Separation**:
+  - Separated continuous snapshot builds (`recipes/chromium-snapshot.json`, targeting `Chromium Snapshot.app`) from stable Ungoogled Chromium (`recipes/chromium.json`, targeting `Chromium.app`).
+  - Added continuous commit revision parsing (`SCMRevision` containing `@{#<rev>}`) in `src/local.rs` for snapshot builds while preserving semantic versioning for stable builds.
+- **Mutual Package Conflict & Compatibility Protection**:
+  - Added `conflicting_applications` to `Recipe` schema (`src/recipe.rs`) with serde aliases (`conflicts_with`, `conflicts`, `conflicting_apps`).
+  - Added mutual conflicts between `recipes/chromium.json` and `recipes/chromium-snapshot.json`.
+  - Implemented `check_conflicting_apps` in `src/installer.rs` verifying conflicts against installed applications, aliases, and bundle paths with bidirectional resolution.
+  - Integrated pre-flight check into `cmd_install` in `src/cli.rs` and defense-in-depth verification into `install_recipe` in `src/installer.rs`.
