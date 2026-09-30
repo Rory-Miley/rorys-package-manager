@@ -1,6 +1,48 @@
 use crate::recipe::{Recipe, SourceConfig};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// Reads the custom rpm version tag from extended attributes on the app bundle.
+pub fn get_bundle_rpm_version(bundle_name: &str) -> Option<String> {
+    let clean_bundle = if bundle_name.ends_with(".app") {
+        bundle_name.to_string()
+    } else {
+        format!("{}.app", bundle_name)
+    };
+    let path = format!("/Applications/{}", clean_bundle);
+    if !Path::new(&path).exists() {
+        return None;
+    }
+
+    let output = Command::new("xattr")
+        .args(["-p", "user.rpm.version", &path])
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let text = String::from_utf8(output.stdout).ok()?;
+        let trimmed = text.trim().to_string();
+        if !trimmed.is_empty() {
+            return Some(trimmed);
+        }
+    }
+    None
+}
+
+/// Stores the custom rpm version tag in extended attributes on the app bundle.
+pub fn set_bundle_rpm_version(bundle_name: &str, version: &str) {
+    let clean_bundle = if bundle_name.ends_with(".app") {
+        bundle_name.to_string()
+    } else {
+        format!("{}.app", bundle_name)
+    };
+    let path = format!("/Applications/{}", clean_bundle);
+    if Path::new(&path).exists() {
+        let _ = Command::new("xattr")
+            .args(["-w", "user.rpm.version", version, &path])
+            .output();
+    }
+}
 
 /// Checks if an app exists in /Applications and extracts its version string.
 pub fn get_local_version(bundle_name: &str) -> Option<String> {
@@ -20,7 +62,14 @@ pub fn get_bundle_local_version(bundle_name: &str, is_snapshot: bool) -> Option<
         return None;
     }
 
-    // For Chromium snapshot builds, CFBundleShortVersionString is a static milestone placeholder
+    // 1. Check for xattr user.rpm.version (if rpm stamped the full package version)
+    if !is_snapshot {
+        if let Some(xattr_ver) = get_bundle_rpm_version(&clean_bundle) {
+            return Some(xattr_ver);
+        }
+    }
+
+    // 2. For Chromium snapshot builds, CFBundleShortVersionString is a static milestone placeholder
     // (e.g. "157.0.8079.0") shared across thousands of commits. The real sequential revision
     // is stored in SCMRevision (e.g. "...@{#1707229}").
     if is_snapshot {
@@ -50,8 +99,51 @@ pub fn get_bundle_local_version(bundle_name: &str, is_snapshot: bool) -> Option<
 
 /// Helper extracting local version based on recipe configuration (e.g. snapshots).
 pub fn get_recipe_local_version(recipe: &Recipe) -> Option<String> {
+    let clean_bundle = if recipe.bundle_name.ends_with(".app") {
+        recipe.bundle_name.clone()
+    } else {
+        format!("{}.app", recipe.bundle_name)
+    };
+
+    let app_path = PathBuf::from(format!("/Applications/{}", clean_bundle));
+    if !app_path.exists() {
+        return None;
+    }
+
     let is_snapshot = matches!(recipe.source, SourceConfig::ChromiumSnapshot { .. });
-    get_bundle_local_version(&recipe.bundle_name, is_snapshot)
+    if is_snapshot {
+        return get_bundle_local_version(&recipe.bundle_name, true);
+    }
+
+    // 1. Check bundle extended attribute
+    if let Some(xattr_ver) = get_bundle_rpm_version(&clean_bundle) {
+        return Some(xattr_ver);
+    }
+
+    let base_plist_ver = get_bundle_local_version(&recipe.bundle_name, false);
+
+    // 2. Check if cache has a full package version matching the bundle's base plist version
+    if let Ok(cache) = crate::cache::load_cache_or_empty() {
+        if let Some(cached) = cache.find(&recipe.name) {
+            if cached.managed {
+                if let Some(ref base) = base_plist_ver {
+                    if (cached.remote_version.starts_with(base) && cached.remote_version.contains(['-', '_']))
+                        || (cached.local_version.starts_with(base) && cached.local_version.contains(['-', '_']))
+                    {
+                        let full = if cached.local_version.contains(['-', '_']) {
+                            cached.local_version.clone()
+                        } else {
+                            cached.remote_version.clone()
+                        };
+                        set_bundle_rpm_version(&clean_bundle, &full);
+                        return Some(full);
+                    }
+                }
+            }
+        }
+    }
+
+    base_plist_ver
 }
 
 fn read_plist_key(plist_path: &str, key: &str) -> Option<String> {

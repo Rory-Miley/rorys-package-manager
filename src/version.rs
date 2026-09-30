@@ -66,15 +66,65 @@ impl Ord for Version {
             }
         }
 
-        // Both segment sets equal: compare pre-release
-        // A release without pre-release tag is NEWER than one with a pre-release tag
-        // e.g. 1.0.0 > 1.0.0-rc1
+        // Both segment sets equal: compare pre-release / build revision
         match (&self.prerelease, &other.prerelease) {
             (None, None) => Ordering::Equal,
-            (Some(_), None) => Ordering::Less,
-            (None, Some(_)) => Ordering::Greater,
-            (Some(a), Some(b)) => a.cmp(b),
+            (Some(a), None) => {
+                if is_prerelease_tag(a) {
+                    Ordering::Less // e.g. 1.0.0-rc1 < 1.0.0
+                } else {
+                    Ordering::Greater // e.g. 1.0.0-1 > 1.0.0
+                }
+            }
+            (None, Some(b)) => {
+                if is_prerelease_tag(b) {
+                    Ordering::Greater // e.g. 1.0.0 > 1.0.0-rc1
+                } else {
+                    Ordering::Less // e.g. 1.0.0 < 1.0.0-1
+                }
+            }
+            (Some(a), Some(b)) => {
+                let a_is_pre = is_prerelease_tag(a);
+                let b_is_pre = is_prerelease_tag(b);
+                match (a_is_pre, b_is_pre) {
+                    (true, false) => Ordering::Less,
+                    (false, true) => Ordering::Greater,
+                    _ => compare_revisions(a, b),
+                }
+            }
         }
+    }
+}
+
+/// Helper to determine if a suffix tag is a pre-release identifier
+/// (e.g. "rc1", "beta", "alpha") vs a build/package revision (e.g. "1", "1.1", "2").
+pub fn is_prerelease_tag(tag: &str) -> bool {
+    let lower = tag.to_lowercase();
+    lower.contains("alpha")
+        || lower.contains("beta")
+        || lower.contains("rc")
+        || lower.contains("dev")
+        || lower.contains("pre")
+        || lower.contains("preview")
+        || lower.contains("nightly")
+}
+
+fn compare_revisions(a: &str, b: &str) -> Ordering {
+    let a_nums: Vec<u64> = a.split('.').filter_map(|s| s.parse::<u64>().ok()).collect();
+    let b_nums: Vec<u64> = b.split('.').filter_map(|s| s.parse::<u64>().ok()).collect();
+    if !a_nums.is_empty() && !b_nums.is_empty() {
+        let max_len = a_nums.len().max(b_nums.len());
+        for i in 0..max_len {
+            let seg_a = a_nums.get(i).copied().unwrap_or(0);
+            let seg_b = b_nums.get(i).copied().unwrap_or(0);
+            match seg_a.cmp(&seg_b) {
+                Ordering::Equal => continue,
+                non_eq => return non_eq,
+            }
+        }
+        Ordering::Equal
+    } else {
+        a.cmp(b)
     }
 }
 
@@ -129,6 +179,18 @@ mod tests {
         let v_release = Version::parse("4.0.0");
         let v_rc = Version::parse("4.0.0-rc1");
         assert!(v_release > v_rc);
+
+        let v_rev1 = Version::parse("156.0.1-1");
+        let v_rev1_copy = Version::parse("156.0.1-1");
+        assert_eq!(v_rev1, v_rev1_copy);
+
+        let v_chrom1 = Version::parse("154.0.8037.57-1.1");
+        let v_chrom2 = Version::parse("154.0.8037.57-1.2");
+        assert!(v_chrom2 > v_chrom1);
+
+        let v_base = Version::parse("156.0.1");
+        let v_build1 = Version::parse("156.0.1-1");
+        assert!(v_build1 > v_base);
     }
 
     #[test]

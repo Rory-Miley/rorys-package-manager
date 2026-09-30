@@ -25,7 +25,7 @@ pub fn apps_ready_to_upgrade() -> Result<Vec<CachedApp>, String> {
 }
 
 /// Upgrades all pending apps using their associated recipes or cache definitions.
-pub fn upgrade_pending(verbose: bool) -> Result<usize, String> {
+pub fn upgrade_pending(verbose: bool, clean: bool) -> Result<usize, String> {
     let pending = apps_ready_to_upgrade().map_err(|e| {
         format!(
             "{}\nRun \x1b[1mcargo run -- update\x1b[0m first to refresh the cache.",
@@ -74,8 +74,10 @@ pub fn upgrade_pending(verbose: bool) -> Result<usize, String> {
             expected_sha256,
             quarantine_strip,
             verbose,
+            clean,
         ) {
             Ok(calculated_hash) => {
+                local::set_bundle_rpm_version(bundle_name, &app.remote_version);
                 if let Err(e) = mark_managed(
                     &app.name,
                     &app.remote_version,
@@ -207,6 +209,7 @@ pub fn install_recipe(
     remote_version: &str,
     download_url: &str,
     verbose: bool,
+    clean: bool,
 ) -> Result<(), String> {
     let all_recipes = recipe::load_recipes().unwrap_or_default();
     check_conflicting_apps(recipe, &all_recipes)?;
@@ -247,14 +250,14 @@ pub fn install_recipe(
         recipe.sha256.as_deref(),
         recipe.quarantine_strip,
         verbose,
+        clean,
     )?;
 
-    let local_version =
-        local::get_recipe_local_version(recipe).unwrap_or_else(|| remote_version.to_string());
+    local::set_bundle_rpm_version(&recipe.bundle_name, remote_version);
 
     mark_managed(
         &recipe.name,
-        &local_version,
+        remote_version,
         remote_version,
         download_url,
         Some(calculated_hash),
@@ -276,7 +279,7 @@ pub fn install_app(
 ) -> Result<(), String> {
     let recipes = recipe::load_recipes().unwrap_or_default();
     if let Some(r) = recipe::find_recipe(name, &recipes) {
-        return install_recipe(r, remote_version, download_url, false);
+        return install_recipe(r, remote_version, download_url, false, false);
     }
 
     let bundle_name = format!("{}.app", name);
@@ -292,6 +295,7 @@ pub fn install_app(
         download_url,
         None,
         true,
+        false,
         false,
     )?;
 
@@ -397,6 +401,7 @@ fn install_bundle_pipeline(
     expected_sha256: Option<&str>,
     quarantine_strip: bool,
     verbose: bool,
+    clean: bool,
 ) -> Result<String, String> {
     if download_url.is_empty() {
         return Err("No download URL provided".to_string());
@@ -425,7 +430,7 @@ fn install_bundle_pipeline(
     }
 
     let (archive_path, sha256_hash) =
-        download_for_app(name, version, download_url, expected_sha256, verbose)?;
+        download_for_app(name, version, download_url, expected_sha256, verbose, clean)?;
 
     let staged_app = extract_app_bundle(&archive_path, bundle_name, verbose)?;
     local::validate_app_bundle(&staged_app)?;
@@ -487,12 +492,133 @@ fn calculate_file_sha256(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+/// Formats a byte count into a human-readable string (B, KB, MB, GB).
+pub fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+
+    let b = bytes as f64;
+    if b >= GB {
+        format!("{:.2} GB", b / GB)
+    } else if b >= MB {
+        format!("{:.1} MB", b / MB)
+    } else if b >= KB {
+        format!("{:.1} KB", b / KB)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+/// Core cleanup logic operating on a given directory.
+fn cleanup_dir(dir: &Path, app_query: Option<&str>, verbose: bool) -> Result<(usize, u64), String> {
+    if !dir.exists() {
+        return Ok((0, 0));
+    }
+
+    let entries = fs::read_dir(dir)
+        .map_err(|e| format!("Failed to read directory {}: {}", dir.display(), e))?;
+
+    let recipes = recipe::load_recipes().unwrap_or_default();
+    let matching_prefixes: Vec<String> = if let Some(q) = app_query {
+        if let Some(r) = recipe::find_recipe(q, &recipes) {
+            let mut prefixes = vec![format!("{}-", sanitize(&r.name).to_lowercase())];
+            for alias in &r.aliases {
+                prefixes.push(format!("{}-", sanitize(alias).to_lowercase()));
+            }
+            prefixes
+        } else {
+            vec![format!("{}-", sanitize(q).to_lowercase())]
+        }
+    } else {
+        vec![]
+    };
+
+    let mut removed_count = 0usize;
+    let mut total_bytes = 0u64;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_name = entry.file_name().to_string_lossy().to_string();
+
+        if file_name.starts_with('.') {
+            continue;
+        }
+
+        let is_match = if matching_prefixes.is_empty() {
+            true
+        } else {
+            matching_prefixes.iter().any(|p| {
+                file_name.to_lowercase().starts_with(p) || file_name.to_lowercase().contains(p)
+            })
+        };
+
+        if !is_match {
+            continue;
+        }
+
+        if path.is_dir() {
+            if let Ok(()) = fs::remove_dir_all(&path) {
+                if verbose {
+                    println!("  \x1b[32m✓\x1b[0m Removed temp directory {}", file_name);
+                }
+            }
+            continue;
+        }
+
+        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                removed_count += 1;
+                total_bytes += size;
+                println!("  \x1b[32m✓\x1b[0m Removed {} ({})", file_name, format_bytes(size));
+            }
+            Err(e) => {
+                eprintln!("  \x1b[31m✗\x1b[0m Failed to remove {}: {}", file_name, e);
+            }
+        }
+    }
+
+    Ok((removed_count, total_bytes))
+}
+
+/// Removes cached payload archives and staging files.
+/// If `app_query` is Some, only removes cached files matching that application.
+/// If `app_query` is None, removes all cached payload archives in `local/staging`.
+pub fn cleanup_staging(app_query: Option<&str>, verbose: bool) -> Result<(), String> {
+    let staging = staging_path();
+    if !staging.exists() {
+        println!("\x1b[1;34m==>\x1b[0m No cached payloads found in {}.", staging.display());
+        return Ok(());
+    }
+
+    println!("\x1b[1;34m==>\x1b[0m Cleaning cached payloads in {}...", staging.display());
+    let (removed_count, total_bytes) = cleanup_dir(&staging, app_query, verbose)?;
+
+    if removed_count == 0 {
+        if let Some(q) = app_query {
+            println!("  No cached payloads found matching '{}'.", q);
+        } else {
+            println!("  No cached payloads found.");
+        }
+    } else {
+        println!(
+            "\x1b[1;34m==>\x1b[0m Cleaned {} file(s), freed {} disk space.",
+            removed_count,
+            format_bytes(total_bytes)
+        );
+    }
+
+    Ok(())
+}
+
 fn download_for_app(
     name: &str,
     version: &str,
     download_url: &str,
     expected_sha256: Option<&str>,
     verbose: bool,
+    clean: bool,
 ) -> Result<(PathBuf, String), String> {
     ensure_staging()?;
     let filename = filename_from_url(download_url);
@@ -503,8 +629,24 @@ fn download_for_app(
         filename
     ));
 
-    // Check if an existing complete download is present in staging
-    if dest.exists() && dest.is_file() {
+    if clean {
+        // Clean install requested: remove dest and any cached payload for this app
+        let prefix = format!("{}-", sanitize(name).to_lowercase());
+        if let Ok(entries) = fs::read_dir(staging_path()) {
+            for entry in entries.flatten() {
+                let fname = entry.file_name().to_string_lossy().to_string();
+                if fname.to_lowercase().starts_with(&prefix) {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+        let _ = fs::remove_file(&dest);
+        if verbose {
+            println!("    🧹 Clean install requested: removed cached payload(s) for {}", name);
+        } else {
+            println!("    🧹 Clean install: purging cached payload");
+        }
+    } else if dest.exists() && dest.is_file() {
         if let Ok(metadata) = fs::metadata(&dest) {
             if metadata.len() > 0 {
                 if let Ok(hash) = calculate_file_sha256(&dest) {
@@ -971,6 +1113,47 @@ mod tests {
         let hash = calculate_file_sha256(&file_path).unwrap();
         assert_eq!(hash, "a948904f2f0f479b8f8197694b30184b0d2ed1c1cd2a1ec0fb85d299a192a447");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_format_bytes() {
+        assert_eq!(format_bytes(500), "500 B");
+        assert_eq!(format_bytes(2048), "2.0 KB");
+        assert_eq!(format_bytes(1024 * 1024 * 5), "5.0 MB");
+        assert_eq!(format_bytes(1024 * 1024 * 1024 * 2), "2.00 GB");
+    }
+
+    #[test]
+    fn test_cleanup_dir_all_and_filtered() {
+        use std::io::Write;
+        let test_dir = std::env::temp_dir().join(format!("rpm_test_cleanup_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&test_dir);
+        fs::create_dir_all(&test_dir).unwrap();
+
+        let file_a = test_dir.join("Chromium-1.0-app.dmg");
+        let file_b = test_dir.join("LibreWolf-2.0-app.dmg");
+        let file_hidden = test_dir.join(".DS_Store");
+
+        fs::File::create(&file_a).unwrap().write_all(b"12345").unwrap();
+        fs::File::create(&file_b).unwrap().write_all(b"1234567890").unwrap();
+        fs::File::create(&file_hidden).unwrap().write_all(b"meta").unwrap();
+
+        // 1. Filtered cleanup: only clean "chromium"
+        let (count, bytes) = cleanup_dir(&test_dir, Some("chromium"), false).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(bytes, 5);
+        assert!(!file_a.exists());
+        assert!(file_b.exists());
+        assert!(file_hidden.exists());
+
+        // 2. Full cleanup: cleans remaining payload files, ignores hidden .DS_Store
+        let (count, bytes) = cleanup_dir(&test_dir, None, false).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(bytes, 10);
+        assert!(!file_b.exists());
+        assert!(file_hidden.exists());
+
+        let _ = fs::remove_dir_all(&test_dir);
     }
 }
 

@@ -37,10 +37,11 @@ A macOS CLI package manager (`rpm`) for **unsigned** and custom macOS apps: chec
 
 | Command | Behavior |
 |---|---|
-| `rpm update` | Scan locally installed apps, check upstream versions; skip updates for unmanaged apps; write `local/cache.json` |
-| `rpm upgrade [-v]` | Read cache, download, verify SHA-256, and install pending **managed** apps (`-v` for verbose payload URLs, full hashes, and extraction logs) |
-| `rpm install [-v] <app>` | Resolve recipe; check compatibility conflicts; refuse if target exists but is unmanaged; install atomically and mark `managed` (`-v` for verbose output) |
+| `rpm update [-v]` | Scan locally installed apps, check upstream versions; skip updates for unmanaged apps; write `local/cache.json` (`-v` for verbose output including download URLs, expected SHA-256 hashes, and architecture) |
+| `rpm upgrade [-v] [-c]` | Read cache, download, verify SHA-256, and install pending **managed** apps (`-v` for verbose output, `-c` to bypass cached payloads and force clean download) |
+| `rpm install [-v] [-c] <app>` | Resolve recipe; check compatibility conflicts; refuse if target exists but is unmanaged; install atomically and mark `managed` (`-v` for verbose output, `-c` for clean install) |
 | `rpm uninstall <app>` | Safely remove a **managed** app from `/Applications` and clear `managed` in cache |
+| `rpm cleanup [app] [-v]` | Remove cached download payloads from `local/staging/` to free disk space or clean specific apps (alias: `rpm clean`) |
 | `rpm list [-v]` | List locally installed packages and their versions (`-v` or `-verbose` for full bundle details and descriptions) |
 | `rpm list-all [-v]` | List all available recipes in catalog and installation status (`-v` or `-verbose` for full details) |
 | `rpm help` | Show usage, available commands, and tracked packages |
@@ -197,8 +198,9 @@ Package recipes live in the `recipes/` directory as individual JSON files (`reci
 - Resolves aliases case-insensitively.
 
 ### 2. Version Engine — `src/version.rs`
-- Parses version strings into numeric segments and pre-release identifiers.
+- Parses version strings into numeric segments and pre-release/revision identifiers.
 - Implements `Ord`, `PartialOrd`, and semantic `PartialEq` (`5.0.1 > 5.0.0`, `1.2.10 > 1.2.9`, `2.0.0 > 2.0.0-rc1`).
+- Differentiates true pre-release tags (`rc`, `beta`, `alpha`, `dev`) from package build revisions (`-1`, `-1.1`). Numeric package revisions are evaluated properly (e.g. `156.0.1-1 == 156.0.1-1`, `156.0.1-2 > 156.0.1-1`), avoiding false "Ahead of upstream" warnings.
 - Defines `VersionComparison` (`UpToDate`, `UpdateAvailable`, `AheadOfUpstream`, `NotInstalled`).
 
 ### 3. Network & Livecheck Engine — `src/network.rs`
@@ -219,6 +221,7 @@ Package recipes live in the `recipes/` directory as individual JSON files (`reci
 
 ### 5. Local Core & Process Management — `src/local.rs`
 - Reads version from `/Applications/<bundle_name>/Contents/Info.plist` (supporting `CFBundleShortVersionString`, `CFBundleVersion`, and snapshot `SCMRevision` commit positions).
+- Extended attribute version tagging (`user.rpm.version`): stamps full package version onto managed bundles and reads it back via `get_bundle_rpm_version`, preserving packager revision suffixes (such as `-1` or `-1.1`) that `CFBundleShortVersionString` in `Info.plist` omits.
 - Active process detection via `pgrep` to prevent modifying active executables in place.
 - Graceful shutdown requests via AppleScript (`osascript`).
 - Structural bundle validation (`validate_app_bundle` checking `Contents/Info.plist` and `Contents/MacOS`).
@@ -233,6 +236,9 @@ Package recipes live in the `recipes/` directory as individual JSON files (`reci
   - `download_for_app` checks whether a non-empty payload already exists in `local/staging/`.
   - Verifies local file SHA-256 using `calculate_file_sha256`; reuses verified downloads without re-downloading if interrupted or re-run.
   - Automatically purges and redownloads corrupt or mismatched files.
+- **Staging Cleanup**:
+  - `cleanup_staging`: Purges all cached payload archives or targets files matching a specific app/alias, calculating and reporting total freed disk space.
+  - `format_bytes`: Formats byte counts into human-readable B, KB, MB, and GB units.
 - **Configurable Verbosity**:
   - Functions accept `verbose: bool` to selectively display or suppress intermediate extraction, staging, DMG mounting, Gatekeeper quarantine stripping, and backup steps while keeping active process warnings visible.
 - **Compatibility & Conflict Handler**:
@@ -252,10 +258,11 @@ Package recipes live in the `recipes/` directory as individual JSON files (`reci
 - `was_managed`: Helper checking if an app was previously installed by `rpm`.
 
 ### 8. CLI Dispatch — `src/cli.rs` + thin `src/main.rs`
-- Commands: `update`, `upgrade`, `install`, `uninstall`, `list`, `list-all`, `help`.
+- Commands: `update`, `upgrade`, `install`, `uninstall`, `cleanup` (alias `clean`), `list`, `list-all`, `help`.
 - Standardized bracketed version formatting `[<version>]` across all commands.
 - `list` only lists installed packages; `list-all` lists the complete recipe catalog.
-- Supports `-v` / `--verbose` / `-verbose` across `install`, `upgrade`, `list`, and `list-all` for detailed inspection (suppressing payload URLs, full SHA-256 digests, and intermediate extraction steps in default mode).
+- Supports `-v` / `--verbose` / `-verbose` across `update`, `install`, `upgrade`, `cleanup`, `list`, and `list-all` for detailed inspection (suppressing payload URLs, full SHA-256 digests, status tags, and intermediate extraction steps in default mode).
+- Clean install flag (`-c` / `--clean`): purges existing cached payloads in staging and forces fresh download and installation even if currently up to date.
 - Pre-flight conflict rejection in `cmd_install` aborting incompatible installations before network operations.
 - Rejection of installs targeting unmanaged existing applications, presenting clear migration steps.
 
@@ -314,3 +321,15 @@ Package recipes live in the `recipes/` directory as individual JSON files (`reci
   - Added atomic `.part` download staging in `src/network.rs` ensuring broken downloads never leave corrupt files at destination paths.
   - Preserved active running process warning (`⚠️ Notice: <app> is currently running`) across both standard and verbose modes.
   - Added unit tests for file SHA-256 calculation and verified both modes live on disk.
+- **Staging Cleanup, Clean Installs (`-c`), and Package Revision (`-X`) Version Tracking**:
+  - Implemented `rpm cleanup [app]` command (with alias `clean`): cleans all archives from `local/staging/` or filters by specific app/alias and reports freed disk space.
+  - Added `-c` / `--clean` flag to `rpm install` and `rpm upgrade`: purges cached payloads and forces a fresh download and installation even if currently up to date.
+  - Fixed local version omission of package revisions (`-1` on LibreWolf, `-1.1` on Chromium): implemented `user.rpm.version` macOS extended attribute stamping (`set_bundle_rpm_version`, `get_bundle_rpm_version`) and cache fallback, ensuring the full release version string is preserved.
+  - Enhanced `version.rs` to differentiate package build revisions (numeric suffixes like `-1`, `-1.1`) from pre-releases (`rc`, `beta`, `alpha`), eliminating spurious `Ahead of upstream` warnings.
+  - Expanded unit test suite to 20 tests covering `format_bytes`, `cleanup_dir`, and build revision ordering.
+- **Clean Standard Update Output & Verbose Mode (`update [-v]`)**:
+  - Differentiated standard vs verbose output for `rpm update`:
+    - Standard mode (`cargo run -- update`) prints a minimal check displaying `🔍 Checking <App>...` and `Local: [<ver>] ==/>/< Upstream: [<ver>]` while omitting `(Current)`, `[managed]`, `[unmanaged]`, remote download URLs, expected SHA-256 digests, and system architecture headers.
+    - Verbose mode (`cargo run -- update -v` / `--verbose`) preserves full diagnostic output with system architecture, emoji badges (`✨`, `🚀`, `💎`, `⚠️`), status labels, payload URLs, expected SHA-256 hashes, and cache metadata.
+    - Added immediate stdout flushing during version checks for real-time progress feedback.
+

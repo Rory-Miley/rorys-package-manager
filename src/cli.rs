@@ -9,28 +9,40 @@ use crate::local;
 use crate::network;
 use crate::recipe;
 use crate::version::{self, VersionComparison};
+use std::io::Write;
 
 /// Entry point from `main`. Returns a process exit code (0 = success).
 pub fn run(args: &[String]) -> i32 {
     let command = args.get(1).map(String::as_str).unwrap_or("help");
 
     match command {
-        "update" => cmd_update(),
+        "update" => {
+            let is_verbose = args
+                .iter()
+                .any(|arg| arg == "-v" || arg == "--verbose" || arg == "-verbose");
+            cmd_update(is_verbose)
+        }
         "upgrade" => {
             let is_verbose = args
                 .iter()
                 .any(|arg| arg == "-v" || arg == "--verbose" || arg == "-verbose");
-            cmd_upgrade(is_verbose)
+            let is_clean = args
+                .iter()
+                .any(|arg| arg == "-c" || arg == "--clean" || arg == "-clean");
+            cmd_upgrade(is_verbose, is_clean)
         }
         "install" => {
             let is_verbose = args
                 .iter()
                 .any(|arg| arg == "-v" || arg == "--verbose" || arg == "-verbose");
+            let is_clean = args
+                .iter()
+                .any(|arg| arg == "-c" || arg == "--clean" || arg == "-clean");
             let app = args.iter().skip(2).find(|arg| !arg.starts_with('-'));
             match app {
-                Some(app) => cmd_install(app, is_verbose),
+                Some(app) => cmd_install(app, is_verbose, is_clean),
                 None => {
-                    eprintln!("\x1b[31mUsage:\x1b[0m cargo run -- install [-v] <app>");
+                    eprintln!("\x1b[31mUsage:\x1b[0m cargo run -- install [-v] [-c] <app>");
                     1
                 }
             }
@@ -41,6 +53,13 @@ pub fn run(args: &[String]) -> i32 {
                 eprintln!("\x1b[31mUsage:\x1b[0m cargo run -- uninstall <app>");
                 1
             }
+        },
+        "cleanup" | "clean" => {
+            let is_verbose = args
+                .iter()
+                .any(|arg| arg == "-v" || arg == "--verbose" || arg == "-verbose");
+            let app = args.iter().skip(2).find(|arg| !arg.starts_with('-'));
+            cmd_cleanup(app.map(|s| s.as_str()), is_verbose)
         },
         "list" => {
             let is_all = args.iter().any(|arg| arg == "--all" || arg == "-a" || arg == "all");
@@ -91,24 +110,28 @@ fn print_help() {
   cargo run -- <command> [app]
 
 \x1b[1mCommands:\x1b[0m
-  update              Check installed apps against upstream, evaluate versions, and write update cache
-  upgrade [-v]        Download, verify SHA-256, and install pending updates (from cache)
-  install [-v] <app>  Install (or reinstall) a tracked app by name or alias
-  uninstall <app>     Safely remove a managed app from /Applications
-  list [-v]           List installed packages and their versions (use -v or -verbose for details)
-  list-all [-v]       List all available package recipes (use -v or -verbose for details)
-  help                Show this message
+  update [-v]            Check installed apps against upstream, evaluate versions, and write update cache
+  upgrade [-v] [-c]      Download, verify SHA-256, and install pending updates (from cache)
+  install [-v] [-c] <app> Install (or reinstall) a tracked app by name or alias (-c for clean install)
+  uninstall <app>        Safely remove a managed app from /Applications
+  cleanup [app] [-v]     Remove cached downloads from staging (or for a specific app)
+  list [-v]              List installed packages and their versions (use -v or -verbose for details)
+  list-all [-v]          List all available package recipes (use -v or -verbose for details)
+  help                   Show this message
 
 \x1b[1mAvailable Recipes:\x1b[0m
   {}
 
 \x1b[1mExamples:\x1b[0m
   cargo run -- update
+  cargo run -- update -v
   cargo run -- list
   cargo run -- list -v
   cargo run -- list-all
   cargo run -- install qbt
-  cargo run -- install chromium
+  cargo run -- install -c qbt
+  cargo run -- cleanup
+  cargo run -- cleanup librewolf
   cargo run -- upgrade
   cargo run -- uninstall qbittorrent
 ",
@@ -229,10 +252,10 @@ fn cmd_list_all(verbose: bool) -> i32 {
 }
 
 /// `rpm upgrade` — read `local/cache.json`, download + verify + install pending apps.
-fn cmd_upgrade(verbose: bool) -> i32 {
+fn cmd_upgrade(verbose: bool, clean: bool) -> i32 {
     println!("\x1b[1;34m==>\x1b[0m \x1b[1mUpgrading apps from update cache...\x1b[0m");
 
-    match installer::upgrade_pending(verbose) {
+    match installer::upgrade_pending(verbose, clean) {
         Ok(0) => {
             println!(
                 "\x1b[1;34m==>\x1b[0m Nothing to upgrade. Run \x1b[1mcargo run -- update\x1b[0m if you expect changes."
@@ -254,7 +277,7 @@ fn cmd_upgrade(verbose: bool) -> i32 {
 }
 
 /// `rpm install <app>` — fetch latest release and install, then mark managed in cache.
-fn cmd_install(query: &str, verbose: bool) -> i32 {
+fn cmd_install(query: &str, verbose: bool, clean: bool) -> i32 {
     let recipes = match recipe::load_recipes() {
         Ok(r) => r,
         Err(e) => {
@@ -326,23 +349,34 @@ fn cmd_install(query: &str, verbose: bool) -> i32 {
         .unwrap_or_else(|| "Not Installed".to_string());
 
     let comparison = version::compare(&local_version, &remote_version);
-    if comparison == VersionComparison::UpToDate && is_managed {
+    if comparison == VersionComparison::UpToDate && is_managed && !clean {
         println!(
             "\x1b[1;34m==>\x1b[0m {} [{}] is already installed and current.",
             recipe.name, local_version
         );
         return 0;
-    } else if comparison == VersionComparison::AheadOfUpstream {
+    } else if comparison == VersionComparison::AheadOfUpstream && !clean {
         println!(
             "\x1b[33mNotice:\x1b[0m Local version [{}] is newer than upstream [{}].",
             local_version, remote_version
         );
     }
 
-    match installer::install_recipe(recipe, &remote_version, &download_url, verbose) {
+    match installer::install_recipe(recipe, &remote_version, &download_url, verbose, clean) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("\x1b[31minstall failed:\x1b[0m {}", e);
+            1
+        }
+    }
+}
+
+/// `rpm cleanup [app]` — remove cached download archives from staging.
+fn cmd_cleanup(app_query: Option<&str>, verbose: bool) -> i32 {
+    match installer::cleanup_staging(app_query, verbose) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("\x1b[31mcleanup failed:\x1b[0m {}", e);
             1
         }
     }
@@ -365,12 +399,14 @@ fn cmd_uninstall(query: &str) -> i32 {
 }
 
 /// `rpm update` — check remotes, compare versions with >, and write `local/cache.json`.
-fn cmd_update() -> i32 {
-    let arch = network::detect_mac_architecture();
-    println!(
-        "\x1b[1;34m==>\x1b[0m \x1b[1mDetected System Architecture:\x1b[0m \x1b[1;32m{}\x1b[0m",
-        arch
-    );
+fn cmd_update(verbose: bool) -> i32 {
+    if verbose {
+        let arch = network::detect_mac_architecture();
+        println!(
+            "\x1b[1;34m==>\x1b[0m \x1b[1mDetected System Architecture:\x1b[0m \x1b[1;32m{}\x1b[0m",
+            arch
+        );
+    }
 
     let recipes = match recipe::load_recipes() {
         Ok(r) => r,
@@ -403,63 +439,101 @@ fn cmd_update() -> i32 {
 
     for (recipe, local_version) in installed_recipes {
         print!("🔍 Checking {}... ", recipe.name);
+        let _ = std::io::stdout().flush();
 
         let managed = cache::was_managed(&recipe.name);
 
         match network::resolve_recipe(recipe) {
             Ok((remote_version, download_url)) => {
-                let comparison = version::compare(&local_version, &remote_version);
-                let update_available = match comparison {
-                    VersionComparison::UpdateAvailable => {
-                        if !managed {
-                            println!(
-                                "\n  ⚠️  Local: [\x1b[33m{}\x1b[0m] → Upstream: [\x1b[32m{}\x1b[0m] (Unmanaged: installed outside rpm)",
-                                local_version, remote_version
-                            );
-                            println!(
-                                "     \x1b[90mSkipping updates. To manage with rpm, uninstall it from /Applications and run 'cargo run -- install {}'.\x1b[0m",
-                                recipe.aliases.first().unwrap_or(&recipe.name.to_lowercase())
-                            );
-                            false
-                        } else {
-                            println!(
-                                "\n  🚀 Local: [\x1b[33m{}\x1b[0m] → Upstream: [\x1b[32m{}\x1b[0m] (Update available){}",
-                                local_version,
-                                remote_version,
-                                if managed { " [managed]" } else { "" }
-                            );
-                            managed
-                        }
-                    }
-                    VersionComparison::UpToDate => {
-                        println!(
-                            "\n  ✨ Local: [\x1b[32m{}\x1b[0m] == Upstream: [\x1b[32m{}\x1b[0m] (Current){}",
-                            local_version,
-                            remote_version,
-                            if managed { " [managed]" } else { " [unmanaged]" }
-                        );
-                        false
-                    }
-                    VersionComparison::AheadOfUpstream => {
-                        println!(
-                            "\n  💎 Local: [\x1b[35m{}\x1b[0m] > Upstream: [\x1b[36m{}\x1b[0m] (Ahead of upstream / Dev build){}",
-                            local_version,
-                            remote_version,
-                            if managed { " [managed]" } else { " [unmanaged]" }
-                        );
-                        false
-                    }
-                    VersionComparison::NotInstalled => false,
+                // If local_version was read without -X (e.g. "156.0.1"), but this app is managed
+                // and remote_version has a revision suffix matching base local_version (e.g. "156.0.1-1"):
+                let effective_local = if managed
+                    && (remote_version.starts_with(&format!("{}-", local_version))
+                        || remote_version.starts_with(&format!("{}_", local_version)))
+                {
+                    local::set_bundle_rpm_version(&recipe.bundle_name, &remote_version);
+                    remote_version.clone()
+                } else {
+                    local_version.clone()
                 };
 
-                println!("  🔗 \x1b[90m{}\x1b[0m", download_url);
-                if let Some(ref expected_hash) = recipe.sha256 {
-                    println!("  🔒 Expected SHA-256: \x1b[90m{}\x1b[0m", expected_hash);
+                let comparison = version::compare(&effective_local, &remote_version);
+                let update_available = match comparison {
+                    VersionComparison::UpdateAvailable => managed,
+                    _ => false,
+                };
+
+                if verbose {
+                    match comparison {
+                        VersionComparison::UpdateAvailable => {
+                            if !managed {
+                                println!(
+                                    "\n  ⚠️  Local: [\x1b[33m{}\x1b[0m] → Upstream: [\x1b[32m{}\x1b[0m] (Unmanaged: installed outside rpm)",
+                                    effective_local, remote_version
+                                );
+                                println!(
+                                    "     \x1b[90mSkipping updates. To manage with rpm, uninstall it from /Applications and run 'cargo run -- install {}'.\x1b[0m",
+                                    recipe.aliases.first().unwrap_or(&recipe.name.to_lowercase())
+                                );
+                            } else {
+                                println!(
+                                    "\n  🚀 Local: [\x1b[33m{}\x1b[0m] → Upstream: [\x1b[32m{}\x1b[0m] (Update available){}",
+                                    effective_local,
+                                    remote_version,
+                                    if managed { " [managed]" } else { "" }
+                                );
+                            }
+                        }
+                        VersionComparison::UpToDate => {
+                            println!(
+                                "\n  ✨ Local: [\x1b[32m{}\x1b[0m] == Upstream: [\x1b[32m{}\x1b[0m] (Current){}",
+                                effective_local,
+                                remote_version,
+                                if managed { " [managed]" } else { " [unmanaged]" }
+                            );
+                        }
+                        VersionComparison::AheadOfUpstream => {
+                            println!(
+                                "\n  💎 Local: [\x1b[35m{}\x1b[0m] > Upstream: [\x1b[36m{}\x1b[0m] (Ahead of upstream / Dev build){}",
+                                effective_local,
+                                remote_version,
+                                if managed { " [managed]" } else { " [unmanaged]" }
+                            );
+                        }
+                        VersionComparison::NotInstalled => {}
+                    }
+
+                    println!("  🔗 \x1b[90m{}\x1b[0m", download_url);
+                    if let Some(ref expected_hash) = recipe.sha256 {
+                        println!("  🔒 Expected SHA-256: \x1b[90m{}\x1b[0m", expected_hash);
+                    }
+                } else {
+                    match comparison {
+                        VersionComparison::UpdateAvailable => {
+                            println!(
+                                "\n  Local: [\x1b[33m{}\x1b[0m] < Upstream: [\x1b[32m{}\x1b[0m]",
+                                effective_local, remote_version
+                            );
+                        }
+                        VersionComparison::UpToDate => {
+                            println!(
+                                "\n  Local: [\x1b[32m{}\x1b[0m] == Upstream: [\x1b[32m{}\x1b[0m]",
+                                effective_local, remote_version
+                            );
+                        }
+                        VersionComparison::AheadOfUpstream => {
+                            println!(
+                                "\n  Local: [\x1b[35m{}\x1b[0m] > Upstream: [\x1b[36m{}\x1b[0m]",
+                                effective_local, remote_version
+                            );
+                        }
+                        VersionComparison::NotInstalled => {}
+                    }
                 }
 
                 cached_apps.push(CachedApp {
                     name: recipe.name.clone(),
-                    local_version,
+                    local_version: effective_local,
                     remote_version,
                     download_url,
                     update_available,
@@ -495,14 +569,18 @@ fn cmd_update() -> i32 {
         return 1;
     }
 
-    println!(
-        "\n\x1b[1;34m==>\x1b[0m Wrote update cache → \x1b[1m{}\x1b[0m",
-        cache::CACHE_PATH
-    );
-    println!(
-        "\x1b[1;34m==>\x1b[0m Managed installs: \x1b[1m{}\x1b[0m",
-        managed_count
-    );
+    if verbose {
+        println!(
+            "\n\x1b[1;34m==>\x1b[0m Wrote update cache → \x1b[1m{}\x1b[0m",
+            cache::CACHE_PATH
+        );
+        println!(
+            "\x1b[1;34m==>\x1b[0m Managed installs: \x1b[1m{}\x1b[0m",
+            managed_count
+        );
+    } else {
+        println!();
+    }
 
     if pending == 0 {
         println!("\x1b[1;34m==>\x1b[0m All tracked apps are up to date.");

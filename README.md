@@ -37,7 +37,11 @@ Scan currently installed applications, query upstreams, compare versions, and re
 ```sh
 cargo run -- update
 ```
-*(Only checks packages currently installed on your machine. Unmanaged applications installed outside `rpm` are flagged with a notice and skipped from automatic update queues).*
+Pass `-v` (or `--verbose`) for detailed diagnostic output, including architecture detection, payload URLs, and expected SHA-256 digests:
+```sh
+cargo run -- update -v
+```
+*(Only checks packages currently installed on your machine. Unmanaged applications installed outside `rpm` are skipped from automatic update queues).*
 
 ### 2. Upgrade Pending Applications
 Download, verify SHA-256, and install pending updates from the cache (only manages `rpm`-tracked apps):
@@ -51,6 +55,10 @@ Install or reinstall an app by its canonical name or alias:
 cargo run -- install qbt
 cargo run -- install chromium
 cargo run -- install librewolf
+```
+Pass `-c` (or `--clean`) to perform a **clean install** (bypasses/purges any cached payload in `local/staging/` to force a fresh download):
+```sh
+cargo run -- install -c qbt
 ```
 > **Security Note:** If an application is already present under `/Applications` but was **not installed by `rpm`** (unmanaged), `rpm` refuses to overwrite it to preserve system integrity. To manage it with `rpm`, uninstall or remove the existing `.app` bundle first, then run `install`.
 
@@ -78,6 +86,13 @@ cargo run -- list-all -v
 Safely remove a managed application from `/Applications` and update cache:
 ```sh
 cargo run -- uninstall qbt
+```
+
+### 7. Clean Cached Downloads (`cleanup`)
+Remove cached download archives from staging to free disk space or prepare for fresh downloads:
+```sh
+cargo run -- cleanup            # Cleans all cached downloads from local/staging
+cargo run -- cleanup librewolf  # Cleans cached downloads for a specific package
 ```
 
 ---
