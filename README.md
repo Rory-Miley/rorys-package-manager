@@ -8,7 +8,6 @@ A fast, lightweight, and safe macOS package manager written in Rust, designed fo
 
 - **Declarative JSON Recipes (`recipes/*.json`)**: Packages are defined in simple JSON files with zero recompilation needed to add or modify apps.
 - **Smart Alias Resolution**: Install or manage apps using intuitive shortcuts (e.g. `qbt` for `qBittorrent`, `chrome` for `Chromium`).
-- **Semantic Version Checking**: Compares versions using natural SemVer ordering (`>`), distinguishing between *Up to date*, *Update available*, and *Ahead of upstream / Dev build*.
 - **Cryptographic SHA-256 Verification**: Streams incoming archives through a SHA-256 hasher during download to ensure file integrity.
 - **Running App Protection & Atomic Swaps**: Detects running applications before upgrading, requests graceful quit, and uses an atomic directory swap with automatic rollback to protect active apps from crashes or partial overwrite corruption.
 - **Pluggable Version Detection (`Livecheck`)**: Supports GitHub releases, Codeberg, Chromium Dash, raw URL manifests, and regex webpage scrapers.
