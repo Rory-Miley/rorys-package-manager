@@ -19,3 +19,4 @@ sha2 = "0.10"
 
 # Regular expressions for livecheck and asset matching
 regex = "1.10"
+terminal_size = "0.4.4"

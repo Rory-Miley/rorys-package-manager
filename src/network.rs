@@ -519,7 +519,18 @@ pub fn download_file_with_hash(
         ));
     }
 
-    let mut dest_file = File::create(destination_path)
+    let total_bytes = response.content_length();
+    let mut progress = crate::progress::DownloadProgress::new(total_bytes);
+
+    let part_path = destination_path.with_extension(format!(
+        "{}.part",
+        destination_path
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("bin")
+    ));
+
+    let mut dest_file = File::create(&part_path)
         .map_err(|e| format!("Failed to create local staging file: {}", e))?;
 
     let mut hasher = Sha256::new();
@@ -536,19 +547,25 @@ pub fn download_file_with_hash(
         dest_file
             .write_all(&buffer[..bytes_read])
             .map_err(|e| format!("Stream write error: {}", e))?;
+        progress.update(bytes_read);
     }
+
+    progress.finish();
 
     let calculated_hash = format!("{:x}", hasher.finalize());
 
     if let Some(expected) = expected_sha256 {
         if !calculated_hash.eq_ignore_ascii_case(expected) {
-            let _ = std::fs::remove_file(destination_path);
+            let _ = std::fs::remove_file(&part_path);
             return Err(format!(
                 "SHA-256 integrity check failed!\n  Expected:   {}\n  Calculated: {}\nDeleted corrupt file.",
                 expected, calculated_hash
             ));
         }
     }
+
+    std::fs::rename(&part_path, destination_path)
+        .map_err(|e| format!("Failed to finalize downloaded file: {}", e))?;
 
     Ok(calculated_hash)
 }

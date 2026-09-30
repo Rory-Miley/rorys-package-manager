@@ -38,8 +38,8 @@ A macOS CLI package manager (`rpm`) for **unsigned** and custom macOS apps: chec
 | Command | Behavior |
 |---|---|
 | `rpm update` | Scan locally installed apps, check upstream versions; skip updates for unmanaged apps; write `local/cache.json` |
-| `rpm upgrade` | Read cache, download, verify SHA-256, and install pending **managed** apps |
-| `rpm install <app>` | Resolve recipe; check compatibility conflicts; refuse if target exists but is unmanaged; install atomically and mark `managed` |
+| `rpm upgrade [-v]` | Read cache, download, verify SHA-256, and install pending **managed** apps (`-v` for verbose payload URLs, full hashes, and extraction logs) |
+| `rpm install [-v] <app>` | Resolve recipe; check compatibility conflicts; refuse if target exists but is unmanaged; install atomically and mark `managed` (`-v` for verbose output) |
 | `rpm uninstall <app>` | Safely remove a **managed** app from `/Applications` and clear `managed` in cache |
 | `rpm list [-v]` | List locally installed packages and their versions (`-v` or `-verbose` for full bundle details and descriptions) |
 | `rpm list-all [-v]` | List all available recipes in catalog and installation status (`-v` or `-verbose` for full details) |
@@ -203,23 +203,38 @@ Package recipes live in the `recipes/` directory as individual JSON files (`reci
 
 ### 3. Network & Livecheck Engine — `src/network.rs`
 - Single-pass download streaming with SHA-256 calculation (`sha2` crate).
+- Atomic destination staging: writes streaming downloads to temporary `<dest>.part` before verifying SHA-256 and atomically promoting to `<dest>`, preventing incomplete transfers from corrupting staging.
 - Pluggable livecheck resolver (GitHub, Codeberg, Chromium Dash, raw URLs, regex scraping).
 - Architecture detection (`arm64` vs `x86_64`) and multi-container asset filtering (`.dmg`, `.zip`, `.tar.gz`, `.tar.xz`).
 - Robust scoring prioritizing `.dmg` > `.zip` > `.tar.*` while strictly filtering out Linux, Windows, AppImage, and Debian packages.
 - Scans recent releases to find the latest valid macOS build even if a release tag omitted macOS binaries.
 
-### 4. Local Core & Process Management — `src/local.rs`
+### 4. Progress & Download UI — `src/progress.rs`
+- Pip-style dynamic terminal progress bar with classic solid orange blocks (`█`) and dim grey shaded background track (`░`).
+- Left-aligned 6-character percentage (`  0%` to `✓ 100%`) keeping bracket positions rock-steady.
+- Real-time downloaded/total MB counter, smoothed download speed (EMA), and remaining ETA countdown.
+- Dynamic terminal scaling via `terminal_size` crate: strictly prevents line wraps on window resizing with `\r\x1b[K` carriage return and line clearing.
+- 100% completion rendering with green checkmark, total duration, and average speed.
+- Automatic TTY detection falling back to clean summary output in non-interactive environments (CI, pipes).
+
+### 5. Local Core & Process Management — `src/local.rs`
 - Reads version from `/Applications/<bundle_name>/Contents/Info.plist` (supporting `CFBundleShortVersionString`, `CFBundleVersion`, and snapshot `SCMRevision` commit positions).
 - Active process detection via `pgrep` to prevent modifying active executables in place.
 - Graceful shutdown requests via AppleScript (`osascript`).
 - Structural bundle validation (`validate_app_bundle` checking `Contents/Info.plist` and `Contents/MacOS`).
 - Path-based quarantine removal (`xattr -dr com.apple.quarantine`).
 
-### 5. Installer Engine — `src/installer.rs`
+### 6. Installer Engine — `src/installer.rs`
 - Archive extractors:
   - Unattended DMG mounting (`hdiutil attach` with `-nobrowse`, `-readonly`, `-noverify`, and piped license acceptance).
   - ZIP extraction (`ditto -x -k`).
   - TAR extraction (`tar -xzf`, `tar -xJf`).
+- **Cached Payload Reuse**:
+  - `download_for_app` checks whether a non-empty payload already exists in `local/staging/`.
+  - Verifies local file SHA-256 using `calculate_file_sha256`; reuses verified downloads without re-downloading if interrupted or re-run.
+  - Automatically purges and redownloads corrupt or mismatched files.
+- **Configurable Verbosity**:
+  - Functions accept `verbose: bool` to selectively display or suppress intermediate extraction, staging, DMG mounting, Gatekeeper quarantine stripping, and backup steps while keeping active process warnings visible.
 - **Compatibility & Conflict Handler**:
   - `check_conflicting_apps`: Verifies that no mutually exclusive applications or bundles are currently installed before installation begins.
 - **Atomic Swap Protocol**:
@@ -230,17 +245,17 @@ Package recipes live in the `recipes/` directory as individual JSON files (`reci
   5. On success: deletes backup.
   6. On failure: restores backup immediately (rollback).
 
-### 6. Update Cache — `src/cache.rs`
+### 7. Update Cache — `src/cache.rs`
 - Manages `local/cache.json`.
 - Records `name`, `local_version`, `remote_version`, `download_url`, `update_available`, `managed`, and `sha256`.
 - `pending_upgrades`: Strictly filters for `managed && update_available && !download_url.is_empty()`.
 - `was_managed`: Helper checking if an app was previously installed by `rpm`.
 
-### 7. CLI Dispatch — `src/cli.rs` + thin `src/main.rs`
+### 8. CLI Dispatch — `src/cli.rs` + thin `src/main.rs`
 - Commands: `update`, `upgrade`, `install`, `uninstall`, `list`, `list-all`, `help`.
 - Standardized bracketed version formatting `[<version>]` across all commands.
 - `list` only lists installed packages; `list-all` lists the complete recipe catalog.
-- Supports `-v` / `-verbose` for detailed inspection.
+- Supports `-v` / `--verbose` / `-verbose` across `install`, `upgrade`, `list`, and `list-all` for detailed inspection (suppressing payload URLs, full SHA-256 digests, and intermediate extraction steps in default mode).
 - Pre-flight conflict rejection in `cmd_install` aborting incompatible installations before network operations.
 - Rejection of installs targeting unmanaged existing applications, presenting clear migration steps.
 
@@ -285,3 +300,17 @@ Package recipes live in the `recipes/` directory as individual JSON files (`reci
   - Added mutual conflicts between `recipes/chromium.json` and `recipes/chromium-snapshot.json`.
   - Implemented `check_conflicting_apps` in `src/installer.rs` verifying conflicts against installed applications, aliases, and bundle paths with bidirectional resolution.
   - Integrated pre-flight check into `cmd_install` in `src/cli.rs` and defense-in-depth verification into `install_recipe` in `src/installer.rs`.
+- **Pip-Style Dynamic Download UI (`src/progress.rs`)**:
+  - Implemented dynamic terminal progress bar featuring solid orange blocks (`█`) and dim grey shaded track (`░`).
+  - Includes real-time downloaded/total MB counter, EMA-smoothed transfer speed, and remaining ETA countdown timer.
+  - Dynamically resizes to the CLI window width on each frame via `terminal_size`, maintaining strict bounds `<= terminal_width - 1` to prevent unwanted line wrapping.
+  - Leaves 100% completed bar visible with a green checkmark (`✓ 100%`) before printing the SHA-256 verification line.
+  - Hooked into `download_file_with_hash` in `src/network.rs` for both `install` and `upgrade` commands.
+  - Added unit tests covering speed, ETA, bounds, indeterminate streams, and terminal width scaling (40-140 columns).
+- **Verbose Output Filtering (`-v` / `--verbose`) & Cached Payload Reuse**:
+  - Added `-v`, `--verbose`, and `-verbose` flag parsing across `rpm install` and `rpm upgrade`.
+  - Filtered output to be clean and minimal by default: showing pip progress bar and `🔒 SHA-256 Verified` without raw URLs, full hash hex digests, or intermediate extraction/staging logs unless verbose mode is requested.
+  - Implemented cached payload reuse in `src/installer.rs`: checks `local/staging/` for complete files matching the expected SHA-256 hash before downloading, avoiding repeated downloads when installs are delayed or interrupted (e.g. when waiting for a running app to close).
+  - Added atomic `.part` download staging in `src/network.rs` ensuring broken downloads never leave corrupt files at destination paths.
+  - Preserved active running process warning (`⚠️ Notice: <app> is currently running`) across both standard and verbose modes.
+  - Added unit tests for file SHA-256 calculation and verified both modes live on disk.

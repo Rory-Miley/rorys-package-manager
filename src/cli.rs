@@ -16,12 +16,23 @@ pub fn run(args: &[String]) -> i32 {
 
     match command {
         "update" => cmd_update(),
-        "upgrade" => cmd_upgrade(),
-        "install" => match args.get(2) {
-            Some(app) => cmd_install(app),
-            None => {
-                eprintln!("\x1b[31mUsage:\x1b[0m cargo run -- install <app>");
-                1
+        "upgrade" => {
+            let is_verbose = args
+                .iter()
+                .any(|arg| arg == "-v" || arg == "--verbose" || arg == "-verbose");
+            cmd_upgrade(is_verbose)
+        }
+        "install" => {
+            let is_verbose = args
+                .iter()
+                .any(|arg| arg == "-v" || arg == "--verbose" || arg == "-verbose");
+            let app = args.iter().skip(2).find(|arg| !arg.starts_with('-'));
+            match app {
+                Some(app) => cmd_install(app, is_verbose),
+                None => {
+                    eprintln!("\x1b[31mUsage:\x1b[0m cargo run -- install [-v] <app>");
+                    1
+                }
             }
         },
         "uninstall" => match args.get(2) {
@@ -81,8 +92,8 @@ fn print_help() {
 
 \x1b[1mCommands:\x1b[0m
   update              Check installed apps against upstream, evaluate versions, and write update cache
-  upgrade             Download, verify SHA-256, and install pending updates (from cache)
-  install <app>       Install (or reinstall) a tracked app by name or alias
+  upgrade [-v]        Download, verify SHA-256, and install pending updates (from cache)
+  install [-v] <app>  Install (or reinstall) a tracked app by name or alias
   uninstall <app>     Safely remove a managed app from /Applications
   list [-v]           List installed packages and their versions (use -v or -verbose for details)
   list-all [-v]       List all available package recipes (use -v or -verbose for details)
@@ -218,10 +229,10 @@ fn cmd_list_all(verbose: bool) -> i32 {
 }
 
 /// `rpm upgrade` — read `local/cache.json`, download + verify + install pending apps.
-fn cmd_upgrade() -> i32 {
+fn cmd_upgrade(verbose: bool) -> i32 {
     println!("\x1b[1;34m==>\x1b[0m \x1b[1mUpgrading apps from update cache...\x1b[0m");
 
-    match installer::upgrade_pending() {
+    match installer::upgrade_pending(verbose) {
         Ok(0) => {
             println!(
                 "\x1b[1;34m==>\x1b[0m Nothing to upgrade. Run \x1b[1mcargo run -- update\x1b[0m if you expect changes."
@@ -243,7 +254,7 @@ fn cmd_upgrade() -> i32 {
 }
 
 /// `rpm install <app>` — fetch latest release and install, then mark managed in cache.
-fn cmd_install(query: &str) -> i32 {
+fn cmd_install(query: &str, verbose: bool) -> i32 {
     let recipes = match recipe::load_recipes() {
         Ok(r) => r,
         Err(e) => {
@@ -296,10 +307,12 @@ fn cmd_install(query: &str) -> i32 {
         return 1;
     }
 
-    println!(
-        "\x1b[1;34m==>\x1b[0m Resolving package \x1b[1m{}\x1b[0m...",
-        recipe.name
-    );
+    if verbose {
+        println!(
+            "\x1b[1;34m==>\x1b[0m Resolving package \x1b[1m{}\x1b[0m...",
+            recipe.name
+        );
+    }
 
     let (remote_version, download_url) = match network::resolve_recipe(recipe) {
         Ok(pair) => pair,
@@ -326,7 +339,7 @@ fn cmd_install(query: &str) -> i32 {
         );
     }
 
-    match installer::install_recipe(recipe, &remote_version, &download_url) {
+    match installer::install_recipe(recipe, &remote_version, &download_url, verbose) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("\x1b[31minstall failed:\x1b[0m {}", e);

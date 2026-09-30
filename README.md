@@ -160,6 +160,7 @@ For full recipe documentation and advanced options (such as regex web scrapers a
 - **`src/recipe.rs`**: JSON recipe parsing, schema validation, `conflicting_applications` parsing, and alias matching.
 - **`src/version.rs`**: Semantic version parsing and ordering (`Ord`, `PartialEq`).
 - **`src/network.rs`**: Streaming SHA-256 download client and pluggable Livecheck strategies.
+- **`src/progress.rs`**: Pip-style dynamic terminal progress bar with orange fill, grey shaded track, speed, and ETA calculations.
 - **`src/local.rs`**: `Info.plist` version inspection, `pgrep` process checking, and quarantine removal.
 - **`src/installer.rs`**: Container extraction (.dmg, .zip, .tar), bundle validation, atomic directory swap, unmanaged bundle guards, and conflict prevention.
 - **`src/cache.rs`**: Local state tracking (`local/cache.json`) and `pending_upgrades` filtering for managed apps.
@@ -171,7 +172,7 @@ For full recipe documentation and advanced options (such as regex web scrapers a
 
 - [x] ~~**Fixed**: LibreWolf recipe & network.rs macOS binary resolution~~ (Resolved: strict non-macOS binary filtering and preference for `.dmg` > `.zip` > `.tar.*`).
 
-- Improve the download UI. Make the download UI (when updating apps and downloading that update, or installing an app for the first time) show a pip style download bar. This bar should scale with the the size of the CLI window so that it doesn't go to a new line when the window is dynamically resized. The bar will be a grey outline with a 50% opacity so that it roughly matches the background colour of the CLI it is open in. I want the progress on this bar to represented by an Orange bar. On the left of the bar it should have the % that has so far be downloaded. Additionally, to the right of the bar, I want a downloaded/total MB counter to represent the progress.
+- [x] ~~**Completed**: Improve download UI~~ (Resolved: Pip-style dynamic progress bar with classic orange blocks, grey shaded background, left-aligned percentage, downloaded/total MB counter, download speed, and ETA scaling seamlessly with the terminal window).
 
 - **'Further down the line'** I would like the final stages for distribution to be done. I.E. I shouldn't ahve to run "$ cargo run -- [commadn]". I want an installer script to install the rpm application so that i can use "$ rpm -- [command]" instead. Additionally, a selfupdater is required for this implimentation also. For this we will need to decide on local config directory to store the cache files and i guess the receipe json files also. I would recommend checking the homebrew package manager to see what best practice is in that regard.
 

@@ -25,7 +25,7 @@ pub fn apps_ready_to_upgrade() -> Result<Vec<CachedApp>, String> {
 }
 
 /// Upgrades all pending apps using their associated recipes or cache definitions.
-pub fn upgrade_pending() -> Result<usize, String> {
+pub fn upgrade_pending(verbose: bool) -> Result<usize, String> {
     let pending = apps_ready_to_upgrade().map_err(|e| {
         format!(
             "{}\nRun \x1b[1mcargo run -- update\x1b[0m first to refresh the cache.",
@@ -73,6 +73,7 @@ pub fn upgrade_pending() -> Result<usize, String> {
             &app.download_url,
             expected_sha256,
             quarantine_strip,
+            verbose,
         ) {
             Ok(calculated_hash) => {
                 if let Err(e) = mark_managed(
@@ -205,6 +206,7 @@ pub fn install_recipe(
     recipe: &Recipe,
     remote_version: &str,
     download_url: &str,
+    verbose: bool,
 ) -> Result<(), String> {
     let all_recipes = recipe::load_recipes().unwrap_or_default();
     check_conflicting_apps(recipe, &all_recipes)?;
@@ -244,6 +246,7 @@ pub fn install_recipe(
         download_url,
         recipe.sha256.as_deref(),
         recipe.quarantine_strip,
+        verbose,
     )?;
 
     let local_version =
@@ -273,7 +276,7 @@ pub fn install_app(
 ) -> Result<(), String> {
     let recipes = recipe::load_recipes().unwrap_or_default();
     if let Some(r) = recipe::find_recipe(name, &recipes) {
-        return install_recipe(r, remote_version, download_url);
+        return install_recipe(r, remote_version, download_url, false);
     }
 
     let bundle_name = format!("{}.app", name);
@@ -289,6 +292,7 @@ pub fn install_app(
         download_url,
         None,
         true,
+        false,
     )?;
 
     mark_managed(
@@ -392,6 +396,7 @@ fn install_bundle_pipeline(
     download_url: &str,
     expected_sha256: Option<&str>,
     quarantine_strip: bool,
+    verbose: bool,
 ) -> Result<String, String> {
     if download_url.is_empty() {
         return Err("No download URL provided".to_string());
@@ -420,12 +425,12 @@ fn install_bundle_pipeline(
     }
 
     let (archive_path, sha256_hash) =
-        download_for_app(name, version, download_url, expected_sha256)?;
+        download_for_app(name, version, download_url, expected_sha256, verbose)?;
 
-    let staged_app = extract_app_bundle(&archive_path, bundle_name)?;
+    let staged_app = extract_app_bundle(&archive_path, bundle_name, verbose)?;
     local::validate_app_bundle(&staged_app)?;
 
-    install_app_bundle_atomic(&staged_app, bundle_name, quarantine_strip)?;
+    install_app_bundle_atomic(&staged_app, bundle_name, quarantine_strip, verbose)?;
 
     // Clean extract workspace; keep the downloaded archive in staging for cache/rollback
     let extract_root = staging_path().join(format!("extract-{}", sanitize(bundle_name)));
@@ -460,11 +465,34 @@ fn filename_from_url(url: &str) -> String {
         .to_string()
 }
 
+fn calculate_file_sha256(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    let mut file = fs::File::open(path)
+        .map_err(|e| format!("Failed to open {}: {}", path.display(), e))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 32768];
+
+    loop {
+        let n = file
+            .read(&mut buffer)
+            .map_err(|e| format!("Failed reading {}: {}", path.display(), e))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+    }
+
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 fn download_for_app(
     name: &str,
     version: &str,
     download_url: &str,
     expected_sha256: Option<&str>,
+    verbose: bool,
 ) -> Result<(PathBuf, String), String> {
     ensure_staging()?;
     let filename = filename_from_url(download_url);
@@ -475,14 +503,48 @@ fn download_for_app(
         filename
     ));
 
-    println!("    📥 Fetching payload from {}", download_url);
+    // Check if an existing complete download is present in staging
+    if dest.exists() && dest.is_file() {
+        if let Ok(metadata) = fs::metadata(&dest) {
+            if metadata.len() > 0 {
+                if let Ok(hash) = calculate_file_sha256(&dest) {
+                    let is_valid = match expected_sha256 {
+                        Some(expected) => hash.eq_ignore_ascii_case(expected),
+                        None => true,
+                    };
+
+                    if is_valid {
+                        if verbose {
+                            println!("    📦 Using cached payload: {}", dest.display());
+                            println!("    🔒 SHA-256 Verified: \x1b[32m{}\x1b[0m", hash);
+                        } else {
+                            println!("    📦 Using cached payload");
+                            println!("    🔒 SHA-256 Verified");
+                        }
+                        return Ok((dest, hash));
+                    } else {
+                        // Stale or corrupt cached payload: remove and redownload
+                        let _ = fs::remove_file(&dest);
+                    }
+                }
+            }
+        }
+    }
+
+    if verbose {
+        println!("    📥 Fetching payload from {}", download_url);
+    }
     let hash = network::download_file_with_hash(download_url, &dest, expected_sha256)?;
-    println!("    🔒 SHA-256 Verified: \x1b[32m{}\x1b[0m", hash);
+    if verbose {
+        println!("    🔒 SHA-256 Verified: \x1b[32m{}\x1b[0m", hash);
+    } else {
+        println!("    🔒 SHA-256 Verified");
+    }
     Ok((dest, hash))
 }
 
 /// Extracts `.dmg`, `.zip`, `.tar.gz`, or `.tar.xz` into staging and returns path to the `.app`.
-fn extract_app_bundle(archive: &Path, bundle_name: &str) -> Result<PathBuf, String> {
+fn extract_app_bundle(archive: &Path, bundle_name: &str, verbose: bool) -> Result<PathBuf, String> {
     let name_lower = archive
         .file_name()
         .and_then(|f| f.to_str())
@@ -490,13 +552,13 @@ fn extract_app_bundle(archive: &Path, bundle_name: &str) -> Result<PathBuf, Stri
         .to_lowercase();
 
     if name_lower.ends_with(".dmg") {
-        extract_dmg(archive, bundle_name)
+        extract_dmg(archive, bundle_name, verbose)
     } else if name_lower.ends_with(".zip") {
-        extract_zip(archive, bundle_name)
+        extract_zip(archive, bundle_name, verbose)
     } else if name_lower.ends_with(".tar.gz") || name_lower.ends_with(".tgz") {
-        extract_tar_gz(archive, bundle_name)
+        extract_tar_gz(archive, bundle_name, verbose)
     } else if name_lower.ends_with(".tar.xz") {
-        extract_tar_xz(archive, bundle_name)
+        extract_tar_xz(archive, bundle_name, verbose)
     } else {
         Err(format!(
             "Unsupported archive type in '{}'. Expected .dmg, .zip, .tar.gz, or .tar.xz",
@@ -505,13 +567,15 @@ fn extract_app_bundle(archive: &Path, bundle_name: &str) -> Result<PathBuf, Stri
     }
 }
 
-fn extract_dmg(dmg: &Path, bundle_name: &str) -> Result<PathBuf, String> {
+fn extract_dmg(dmg: &Path, bundle_name: &str, verbose: bool) -> Result<PathBuf, String> {
     let mount = staging_path().join(format!("mnt-{}", sanitize(bundle_name)));
     let _ = fs::remove_dir_all(&mount);
     fs::create_dir_all(&mount)
         .map_err(|e| format!("Failed to create mount point: {}", e))?;
 
-    println!("    💿 Mounting DMG (unattended)...");
+    if verbose {
+        println!("    💿 Mounting DMG (unattended)...");
+    }
     let mut child = Command::new("hdiutil")
         .args([
             "attach",
@@ -557,7 +621,9 @@ fn extract_dmg(dmg: &Path, bundle_name: &str) -> Result<PathBuf, String> {
             format!("{}.app", bundle_name)
         };
         let staged = extract_root.join(clean_name);
-        println!("    📂 Staging {}...", bundle_name);
+        if verbose {
+            println!("    📂 Staging {}...", bundle_name);
+        }
         ditto_copy(&app_src, &staged)?;
         Ok(staged)
     })();
@@ -571,13 +637,15 @@ fn extract_dmg(dmg: &Path, bundle_name: &str) -> Result<PathBuf, String> {
     result
 }
 
-fn extract_zip(zip: &Path, bundle_name: &str) -> Result<PathBuf, String> {
+fn extract_zip(zip: &Path, bundle_name: &str, verbose: bool) -> Result<PathBuf, String> {
     let extract_root = staging_path().join(format!("extract-{}", sanitize(bundle_name)));
     let _ = fs::remove_dir_all(&extract_root);
     fs::create_dir_all(&extract_root)
         .map_err(|e| format!("Failed to create extract dir: {}", e))?;
 
-    println!("    📦 Extracting ZIP archive...");
+    if verbose {
+        println!("    📦 Extracting ZIP archive...");
+    }
     let status = Command::new("ditto")
         .args([
             "-x",
@@ -595,13 +663,15 @@ fn extract_zip(zip: &Path, bundle_name: &str) -> Result<PathBuf, String> {
     find_app_bundle(&extract_root, bundle_name)
 }
 
-fn extract_tar_gz(tar: &Path, bundle_name: &str) -> Result<PathBuf, String> {
+fn extract_tar_gz(tar: &Path, bundle_name: &str, verbose: bool) -> Result<PathBuf, String> {
     let extract_root = staging_path().join(format!("extract-{}", sanitize(bundle_name)));
     let _ = fs::remove_dir_all(&extract_root);
     fs::create_dir_all(&extract_root)
         .map_err(|e| format!("Failed to create extract dir: {}", e))?;
 
-    println!("    📦 Extracting TAR.GZ archive...");
+    if verbose {
+        println!("    📦 Extracting TAR.GZ archive...");
+    }
     let status = Command::new("tar")
         .args([
             "-xzf",
@@ -619,13 +689,15 @@ fn extract_tar_gz(tar: &Path, bundle_name: &str) -> Result<PathBuf, String> {
     find_app_bundle(&extract_root, bundle_name)
 }
 
-fn extract_tar_xz(tar: &Path, bundle_name: &str) -> Result<PathBuf, String> {
+fn extract_tar_xz(tar: &Path, bundle_name: &str, verbose: bool) -> Result<PathBuf, String> {
     let extract_root = staging_path().join(format!("extract-{}", sanitize(bundle_name)));
     let _ = fs::remove_dir_all(&extract_root);
     fs::create_dir_all(&extract_root)
         .map_err(|e| format!("Failed to create extract dir: {}", e))?;
 
-    println!("    📦 Extracting TAR.XZ archive...");
+    if verbose {
+        println!("    📦 Extracting TAR.XZ archive...");
+    }
     let status = Command::new("tar")
         .args([
             "-xJf",
@@ -728,6 +800,7 @@ fn install_app_bundle_atomic(
     staged_app: &Path,
     bundle_name: &str,
     quarantine_strip: bool,
+    verbose: bool,
 ) -> Result<(), String> {
     let clean_bundle = if bundle_name.ends_with(".app") {
         bundle_name.to_string()
@@ -743,9 +816,11 @@ fn install_app_bundle_atomic(
             clean_bundle
         ));
     }
-    println!("    🛠  Installing to {}...", target.display());
+    if verbose {
+        println!("    🛠  Installing to {}...", target.display());
+    }
 
-    // 1. Process active check
+    // 1. Process active check (ALWAYS visible)
     if local::is_app_running(&clean_bundle) {
         println!("    ⚠️  Notice: {} is currently running.", clean_bundle);
         println!("       Attempting graceful quit before upgrade...");
@@ -758,7 +833,9 @@ fn install_app_bundle_atomic(
 
     // 2. Strip quarantine on the staged directory BEFORE copying to /Applications
     if quarantine_strip {
-        println!("    🛡️  Stripping Apple Gatekeeper quarantine attribute...");
+        if verbose {
+            println!("    🛡️  Stripping Apple Gatekeeper quarantine attribute...");
+        }
         let _ = local::remove_quarantine(staged_app);
     }
 
@@ -769,7 +846,9 @@ fn install_app_bundle_atomic(
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let backup = PathBuf::from(format!("/Applications/{}.rpm-backup-{}", clean_bundle, ts));
-        println!("    🔄 Backing up current install → {}", backup.display());
+        if verbose {
+            println!("    🔄 Backing up current install → {}", backup.display());
+        }
         fs::rename(&target, &backup)
             .map_err(|e| format!("Failed to rename old installation: {}", e))?;
         Some(backup)
@@ -877,6 +956,21 @@ mod tests {
 
         // Neither is installed in /Applications, so no conflict error
         assert!(check_conflicting_apps(&r1, &recipes).is_ok());
+    }
+
+    #[test]
+    fn test_calculate_file_sha256() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("rpm_test_sha256_{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let file_path = dir.join("test.txt");
+        let mut f = fs::File::create(&file_path).unwrap();
+        f.write_all(b"hello world\n").unwrap();
+        drop(f);
+
+        let hash = calculate_file_sha256(&file_path).unwrap();
+        assert_eq!(hash, "a948904f2f0f479b8f8197694b30184b0d2ed1c1cd2a1ec0fb85d299a192a447");
+        let _ = fs::remove_dir_all(&dir);
     }
 }
 
