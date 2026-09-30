@@ -61,9 +61,7 @@ pub fn upgrade_pending(verbose: bool, clean: bool) -> Result<usize, String> {
         let bundle_name = matching_recipe
             .map(|r| r.bundle_name.as_str())
             .unwrap_or(app.name.as_str());
-        let quarantine_strip = matching_recipe
-            .map(|r| r.quarantine_strip)
-            .unwrap_or(true);
+        let quarantine_strip = matching_recipe.map(|r| r.quarantine_strip).unwrap_or(true);
         let expected_sha256 = matching_recipe.and_then(|r| r.sha256.as_deref());
 
         match install_bundle_pipeline(
@@ -85,12 +83,12 @@ pub fn upgrade_pending(verbose: bool, clean: bool) -> Result<usize, String> {
                     &app.download_url,
                     Some(calculated_hash),
                 ) {
-                    eprintln!("  \x1b[33mwarning:\x1b[0m installed but failed to update cache: {}", e);
+                    eprintln!(
+                        "  \x1b[33mwarning:\x1b[0m installed but failed to update cache: {}",
+                        e
+                    );
                 }
-                println!(
-                    "  \x1b[32m✓\x1b[0m {} installed successfully.",
-                    app.name
-                );
+                println!("  \x1b[32m✓\x1b[0m {} installed successfully.", app.name);
                 upgraded += 1;
             }
             Err(e) => {
@@ -127,12 +125,13 @@ pub fn check_conflicting_apps(recipe: &Recipe, recipes: &[Recipe]) -> Result<(),
         if other.name.eq_ignore_ascii_case(&recipe.name) {
             continue;
         }
-        let conflicts_with_this = other.conflicting_applications.iter().any(|c| {
-            recipe.matches(c) || c.eq_ignore_ascii_case(&recipe.bundle_name)
-        });
+        let conflicts_with_this = other
+            .conflicting_applications
+            .iter()
+            .any(|c| recipe.matches(c) || c.eq_ignore_ascii_case(&recipe.bundle_name));
         if conflicts_with_this {
-            let other_installed = local::get_recipe_local_version(other).is_some()
-                || other.app_path().exists();
+            let other_installed =
+                local::get_recipe_local_version(other).is_some() || other.app_path().exists();
             if other_installed {
                 let clean_bundle = if other.bundle_name.ends_with(".app") {
                     other.bundle_name.clone()
@@ -141,10 +140,20 @@ pub fn check_conflicting_apps(recipe: &Recipe, recipes: &[Recipe]) -> Result<(),
                 };
                 let is_managed = cache::was_managed(&other.name);
                 let uninstall_hint = if is_managed {
-                    let alias = other.aliases.first().map(|s| s.as_str()).unwrap_or(&other.name);
-                    format!("To resolve this, uninstall it first:\n  cargo run -- uninstall {}", alias)
+                    let alias = other
+                        .aliases
+                        .first()
+                        .map(|s| s.as_str())
+                        .unwrap_or(&other.name);
+                    format!(
+                        "To resolve this, uninstall it first:\n  cargo run -- uninstall {}",
+                        alias
+                    )
                 } else {
-                    format!("To resolve this, remove it first:\n  rm -rf '/Applications/{}'", clean_bundle)
+                    format!(
+                        "To resolve this, remove it first:\n  rm -rf '/Applications/{}'",
+                        clean_bundle
+                    )
                 };
                 return Err(format!(
                     "Cannot install '{}' because conflicting application '{}' is currently installed at /Applications/{}.\n{}",
@@ -169,10 +178,20 @@ fn check_one_conflict(recipe: &Recipe, conflict: &str, recipes: &[Recipe]) -> Op
             };
             let is_managed = cache::was_managed(&target_recipe.name);
             let uninstall_hint = if is_managed {
-                let alias = target_recipe.aliases.first().map(|s| s.as_str()).unwrap_or(&target_recipe.name);
-                format!("To resolve this, uninstall it first:\n  cargo run -- uninstall {}", alias)
+                let alias = target_recipe
+                    .aliases
+                    .first()
+                    .map(|s| s.as_str())
+                    .unwrap_or(&target_recipe.name);
+                format!(
+                    "To resolve this, uninstall it first:\n  cargo run -- uninstall {}",
+                    alias
+                )
             } else {
-                format!("To resolve this, remove it first:\n  rm -rf '/Applications/{}'", clean_bundle)
+                format!(
+                    "To resolve this, remove it first:\n  rm -rf '/Applications/{}'",
+                    clean_bundle
+                )
             };
             return Some(format!(
                 "Cannot install '{}' because conflicting application '{}' is currently installed at /Applications/{}.\n{}",
@@ -190,9 +209,15 @@ fn check_one_conflict(recipe: &Recipe, conflict: &str, recipes: &[Recipe]) -> Op
         if target_path.exists() {
             let is_managed = cache::was_managed(conflict) || cache::was_managed(&clean_bundle);
             let uninstall_hint = if is_managed {
-                format!("To resolve this, uninstall it first:\n  cargo run -- uninstall {}", conflict)
+                format!(
+                    "To resolve this, uninstall it first:\n  cargo run -- uninstall {}",
+                    conflict
+                )
             } else {
-                format!("To resolve this, remove it first:\n  rm -rf '/Applications/{}'", clean_bundle)
+                format!(
+                    "To resolve this, remove it first:\n  rm -rf '/Applications/{}'",
+                    clean_bundle
+                )
             };
             return Some(format!(
                 "Cannot install '{}' because conflicting application '{}' is currently installed at /Applications/{}.\n{}",
@@ -221,24 +246,23 @@ pub fn install_recipe(
     };
     let target = PathBuf::from(format!("/Applications/{}", clean_bundle));
     if target.exists() && !cache::was_managed(&recipe.name) {
-        let alias = recipe.aliases.first().map(|s| s.as_str()).unwrap_or(&recipe.name);
+        let alias = recipe
+            .aliases
+            .first()
+            .map(|s| s.as_str())
+            .unwrap_or(&recipe.name);
         return Err(format!(
             "'{}' is already installed at /Applications/{} but is not managed by rpm.\n\
              For security and system integrity, rpm will not overwrite applications installed outside this package manager.\n\
              To manage '{}' with rpm:\n  \
              1. Uninstall or remove '/Applications/{}' (e.g. drag to Trash or run: rm -rf '/Applications/{}')\n  \
              2. Reinstall via rpm: cargo run -- install {}",
-            recipe.name,
-            clean_bundle,
-            recipe.name,
-            clean_bundle,
-            clean_bundle,
-            alias
+            recipe.name, clean_bundle, recipe.name, clean_bundle, clean_bundle, alias
         ));
     }
 
     println!(
-        "\x1b[1;34m==>\x1b[0m Installing \x1b[1m{}\x1b[0m ([{}])",
+        "\x1b[1;34m==>\x1b[0m Installing \x1b[1m{}\x1b[0m [{}]",
         recipe.name, remote_version
     );
 
@@ -263,20 +287,13 @@ pub fn install_recipe(
         Some(calculated_hash),
     )?;
 
-    println!(
-        "  \x1b[32m✓\x1b[0m {} installed successfully.",
-        recipe.name
-    );
+    println!("  \x1b[32m✓\x1b[0m {} installed successfully.", recipe.name);
     Ok(())
 }
 
 /// Backwards-compatible install helper.
 #[allow(dead_code)]
-pub fn install_app(
-    name: &str,
-    remote_version: &str,
-    download_url: &str,
-) -> Result<(), String> {
+pub fn install_app(name: &str, remote_version: &str, download_url: &str) -> Result<(), String> {
     let recipes = recipe::load_recipes().unwrap_or_default();
     if let Some(r) = recipe::find_recipe(name, &recipes) {
         return install_recipe(r, remote_version, download_url, false, false);
@@ -307,10 +324,7 @@ pub fn install_app(
         Some(calculated_hash),
     )?;
 
-    println!(
-        "  \x1b[32m✓\x1b[0m {} installed successfully.",
-        name
-    );
+    println!("  \x1b[32m✓\x1b[0m {} installed successfully.", name);
     Ok(())
 }
 
@@ -474,8 +488,8 @@ fn calculate_file_sha256(path: &Path) -> Result<String, String> {
     use sha2::{Digest, Sha256};
     use std::io::Read;
 
-    let mut file = fs::File::open(path)
-        .map_err(|e| format!("Failed to open {}: {}", path.display(), e))?;
+    let mut file =
+        fs::File::open(path).map_err(|e| format!("Failed to open {}: {}", path.display(), e))?;
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 32768];
 
@@ -571,7 +585,11 @@ fn cleanup_dir(dir: &Path, app_query: Option<&str>, verbose: bool) -> Result<(us
             Ok(()) => {
                 removed_count += 1;
                 total_bytes += size;
-                println!("  \x1b[32m✓\x1b[0m Removed {} ({})", file_name, format_bytes(size));
+                println!(
+                    "  \x1b[32m✓\x1b[0m Removed {} ({})",
+                    file_name,
+                    format_bytes(size)
+                );
             }
             Err(e) => {
                 eprintln!("  \x1b[31m✗\x1b[0m Failed to remove {}: {}", file_name, e);
@@ -588,11 +606,17 @@ fn cleanup_dir(dir: &Path, app_query: Option<&str>, verbose: bool) -> Result<(us
 pub fn cleanup_staging(app_query: Option<&str>, verbose: bool) -> Result<(), String> {
     let staging = staging_path();
     if !staging.exists() {
-        println!("\x1b[1;34m==>\x1b[0m No cached payloads found in {}.", staging.display());
+        println!(
+            "\x1b[1;34m==>\x1b[0m No cached payloads found in {}.",
+            staging.display()
+        );
         return Ok(());
     }
 
-    println!("\x1b[1;34m==>\x1b[0m Cleaning cached payloads in {}...", staging.display());
+    println!(
+        "\x1b[1;34m==>\x1b[0m Cleaning cached payloads in {}...",
+        staging.display()
+    );
     let (removed_count, total_bytes) = cleanup_dir(&staging, app_query, verbose)?;
 
     if removed_count == 0 {
@@ -642,7 +666,10 @@ fn download_for_app(
         }
         let _ = fs::remove_file(&dest);
         if verbose {
-            println!("    🧹 Clean install requested: removed cached payload(s) for {}", name);
+            println!(
+                "    🧹 Clean install requested: removed cached payload(s) for {}",
+                name
+            );
         } else {
             println!("    🧹 Clean install: purging cached payload");
         }
@@ -712,8 +739,7 @@ fn extract_app_bundle(archive: &Path, bundle_name: &str, verbose: bool) -> Resul
 fn extract_dmg(dmg: &Path, bundle_name: &str, verbose: bool) -> Result<PathBuf, String> {
     let mount = staging_path().join(format!("mnt-{}", sanitize(bundle_name)));
     let _ = fs::remove_dir_all(&mount);
-    fs::create_dir_all(&mount)
-        .map_err(|e| format!("Failed to create mount point: {}", e))?;
+    fs::create_dir_all(&mount).map_err(|e| format!("Failed to create mount point: {}", e))?;
 
     if verbose {
         println!("    💿 Mounting DMG (unattended)...");
@@ -890,12 +916,17 @@ fn find_app_bundle(root: &Path, bundle_name: &str) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("Could not find {} inside archive", clean_name))
 }
 
-fn find_app_bundle_walk(dir: &Path, bundle_name: &str, depth: usize) -> Result<Option<PathBuf>, String> {
+fn find_app_bundle_walk(
+    dir: &Path,
+    bundle_name: &str,
+    depth: usize,
+) -> Result<Option<PathBuf>, String> {
     if depth > 4 {
         return Ok(None);
     }
 
-    let entries = fs::read_dir(dir).map_err(|e| format!("Failed to read {}: {}", dir.display(), e))?;
+    let entries =
+        fs::read_dir(dir).map_err(|e| format!("Failed to read {}: {}", dir.display(), e))?;
     let search_stem = bundle_name.strip_suffix(".app").unwrap_or(bundle_name);
 
     for entry in entries.flatten() {
@@ -922,7 +953,10 @@ fn ditto_copy(from: &Path, to: &Path) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|e| format!("Failed to create parent: {}", e))?;
     }
     let status = Command::new("ditto")
-        .args([from.to_str().unwrap_or_default(), to.to_str().unwrap_or_default()])
+        .args([
+            from.to_str().unwrap_or_default(),
+            to.to_str().unwrap_or_default(),
+        ])
         .status()
         .map_err(|e| format!("Failed to run ditto: {}", e))?;
 
@@ -969,7 +1003,9 @@ fn install_app_bundle_atomic(
         let _ = local::request_quit(&clean_bundle);
         std::thread::sleep(Duration::from_millis(800));
         if local::is_app_running(&clean_bundle) {
-            println!("       App still active in memory. Utilizing atomic swap to prevent corruption.");
+            println!(
+                "       App still active in memory. Utilizing atomic swap to prevent corruption."
+            );
         }
     }
 
@@ -1111,7 +1147,10 @@ mod tests {
         drop(f);
 
         let hash = calculate_file_sha256(&file_path).unwrap();
-        assert_eq!(hash, "a948904f2f0f479b8f8197694b30184b0d2ed1c1cd2a1ec0fb85d299a192a447");
+        assert_eq!(
+            hash,
+            "a948904f2f0f479b8f8197694b30184b0d2ed1c1cd2a1ec0fb85d299a192a447"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1126,7 +1165,8 @@ mod tests {
     #[test]
     fn test_cleanup_dir_all_and_filtered() {
         use std::io::Write;
-        let test_dir = std::env::temp_dir().join(format!("rpm_test_cleanup_{}", std::process::id()));
+        let test_dir =
+            std::env::temp_dir().join(format!("rpm_test_cleanup_{}", std::process::id()));
         let _ = fs::remove_dir_all(&test_dir);
         fs::create_dir_all(&test_dir).unwrap();
 
@@ -1134,9 +1174,18 @@ mod tests {
         let file_b = test_dir.join("LibreWolf-2.0-app.dmg");
         let file_hidden = test_dir.join(".DS_Store");
 
-        fs::File::create(&file_a).unwrap().write_all(b"12345").unwrap();
-        fs::File::create(&file_b).unwrap().write_all(b"1234567890").unwrap();
-        fs::File::create(&file_hidden).unwrap().write_all(b"meta").unwrap();
+        fs::File::create(&file_a)
+            .unwrap()
+            .write_all(b"12345")
+            .unwrap();
+        fs::File::create(&file_b)
+            .unwrap()
+            .write_all(b"1234567890")
+            .unwrap();
+        fs::File::create(&file_hidden)
+            .unwrap()
+            .write_all(b"meta")
+            .unwrap();
 
         // 1. Filtered cleanup: only clean "chromium"
         let (count, bytes) = cleanup_dir(&test_dir, Some("chromium"), false).unwrap();
@@ -1156,4 +1205,3 @@ mod tests {
         let _ = fs::remove_dir_all(&test_dir);
     }
 }
-
