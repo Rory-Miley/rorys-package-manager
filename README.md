@@ -1,6 +1,18 @@
-# Rory's Package Manager (`rpm`)
+# Rory's Package Manager (`rpm`) MacOS
 
-A fast, lightweight, and safe macOS package manager written in Rust, designed for managing, updating, and installing unsigned and custom macOS software.
+NOT TO BE CONFUSED WITH "red hat package manager (rpm) for linux", it is annoying and unfortunate that they have the same name as me, but I don't use Fedora (Arch obviously) and this package manager is for MacOS. I will consider changing the name... never.
+
+A fast, lightweight, and safe macOS package manager written in Rust, designed for managing, updating, and installing unsigned and custom macOS software. In addition, it removes the apple "quarantine" attribute from the package.
+
+---
+
+## Compatibility
+
+Honestly, no idea, but I can tell you what I have tested it on:
+
+Macbook M3 Pro
+- MacOS version: 26.6.1
+- MacOS version: 26.6.2
 
 ---
 
