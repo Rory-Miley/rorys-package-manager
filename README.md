@@ -118,6 +118,8 @@ For full recipe documentation and advanced options (such as regex web scrapers a
 
 ## To Do
 
+- URGENT: Fix bug with librewolf receipe and network.rs, When trying to download the package from codeberg, it finds the arm linux version and downloads that. This is obviously wrong, and i am pretty sure i know why. The version check looks for arm as apple silicon is arm. We should maybe ensure we exclude packages that have linux in their name, and put priority on .dmg files over tar files. Thats my bad lol. Get to this next time.
+
 - Improve the download UI. Make the download UI (when updating apps and downloading that update, or installing an app for the first time) show a pip style download bar. This bar should scale with the the size of the CLI window so that it doesn't go to a new line when the window is dynamically resized. The bar will be a grey outline with a 50% opacity so that it roughly matches the background colour of the CLI it is open in. I want the progress on this bar to represented by an Orange bar. On the left of the bar it should have the % that has so far be downloaded. Additionally, to the right of the bar, I want a downloaded/total MB counter to represent the progress.
 
 - **'Further down the line'** I would like the final stages for distribution to be done. I.E. I shouldn't ahve to run "$ cargo run -- [commadn]". I want an installer script to install the rpm application so that i can use "$ rpm -- [command]" instead. Additionally, a selfupdater is required for this implimentation also. For this we will need to decide on local config directory to store the cache files and i guess the receipe json files also. I would recommend checking the homebrew package manager to see what best practice is in that regard.
