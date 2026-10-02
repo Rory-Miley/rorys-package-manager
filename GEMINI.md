@@ -65,12 +65,12 @@ Certain applications cannot coexist safely on macOS (for example, stable `Chromi
 3. **Bidirectional Resolution**: Protects against conflicts whether declared directly on the target recipe or declared by an existing installed recipe against the incoming target.
 4. **Friendly Migration Guidance**: Aborts with clear actionable instructions showing how to uninstall the conflicting package first via `cargo run -- uninstall <app>`.
 
-### Standalone CLI & Distribution Roadmap (v0.3.0 – v0.5.0)
+### Standalone CLI & Distribution Roadmap
 
-To transition from running exclusively via `cargo run --` to a standalone CLI tool (`rpm <command>`), work is split into three focused milestones:
+The roadmap transitions `rpm` from running via `cargo run --` into a standalone, distribution-ready CLI tool. Completed work is tracked by release version, while future milestones are organized by feature area without premature version locking:
 
-#### Phase 1: Standalone Binary & Dual-Mode Paths Engine (v0.3.0)
-1. **Cargo Binary Definition**: Defines `[[bin]] name = "rpm" path = "src/main.rs"` in `Cargo.toml` so `cargo build` outputs `target/debug/rpm` and `target/release/rpm` directly.
+#### Completed: Standalone Binary & Dual-Mode Paths Engine (v0.3.0 / v0.3.1)
+1. **Cargo Binary Definition**: Defined `[[bin]] name = "rpm" path = "src/main.rs"` in `Cargo.toml`.
 2. **Dual-Mode Paths Engine (`src/paths.rs`)**:
    - **Local Dev Mode**: Automatically detected when `./recipes/` and `Cargo.toml` exist in the current working directory (or overridden by `RPM_DEV=1`/`RPM_DIR`). Uses `./recipes/`, `./local/cache.toml`, and `./local/staging/`.
    - **Installed System Mode**: When run outside the repository, uses:
@@ -79,23 +79,35 @@ To transition from running exclusively via `cargo run --` to a standalone CLI to
      - Persistent State: `~/.rpm/cache.toml`.
      - Download Cache: `~/Library/Caches/rpm/staging/` (macOS-compliant purgeable cache; auto-cleaned on disk pressure without breaking `rpm` state).
 3. **Local Developer Installer & Uninstaller (`scripts/install-local.sh`, `scripts/uninstall-local.sh`)**:
-   - `install-local.sh`: Compiles release binary (`cargo build --release`), creates `/opt/rpm/bin`, sets permissions (`sudo chown -R $(whoami):admin /opt/rpm`), registers in `/etc/paths.d/rpm`, and seeds `~/.rpm/recipes/`.
+   - `install-local.sh`: Compiles release binary (`cargo build --release`), creates `/opt/rpm/bin`, guarantees correct user ownership (`$SUDO_USER`), registers in `/etc/paths.d/rpm`, and seeds `~/.rpm/recipes/`.
    - `uninstall-local.sh`: Removes `/opt/rpm`, unregisters `/etc/paths.d/rpm`, and interactively prompts whether to clean `~/.rpm` and `~/Library/Caches/rpm`.
 
+#### Future: Sparse Catalog Index & On-Demand Recipe Fetching
+To avoid local disk bloat and eliminate slow bulk recipe synchronizations (mirroring Homebrew's transition to an API/sparse index model), recipes remain hosted upstream and are fetched only on demand:
+1. **Upstream Catalog Index (`recipes/index.toml`)**:
+   - A lightweight central index file hosted in the repository defining package names, recipe filenames, aliases, and short descriptions.
+   - Avoids GitHub REST API rate limits (60 req/hr) by fetching directly from `raw.githubusercontent.com`.
+2. **On-Demand Alias Resolution & Installation**:
+   - When a user runs `rpm install <query>` (e.g. `rpm install qbt`):
+     1. Checks if the recipe is already cached in `~/.rpm/recipes/`.
+     2. If not, queries local/cached `index.toml` (auto-refreshed from upstream when missing or stale).
+     3. Resolves aliases (`qbt` → `qbittorrent.toml`).
+     4. Downloads *only* the specific recipe file (`recipes/qbittorrent.toml`) into `~/.rpm/recipes/`.
+3. **Targeted Updates (`rpm update`)**:
+   - In installed system mode, `rpm update` refreshes `index.toml` and updates recipes *only* for packages currently installed/managed on the user's machine, eliminating bulk downloads for uninstalled packages.
+4. **Instant Catalog Browsing (`rpm list-all`)**:
+   - Reads `index.toml` directly to list available packages and descriptions without downloading full recipe files.
+5. **Dev Mode Isolation**:
+   - Dev mode continues to read local `./recipes/*.toml` files directly, bypassing network calls.
 
-#### Phase 2: Upstream Recipe Synchronization (v0.4.0)
-1. **Recipe Synchronization in `rpm update`**:
-   - In installed system mode, `rpm update` pulls the latest declarative recipes from GitHub into `~/.rpm/recipes/` before checking local versions, ensuring users always have up-to-date download URLs and regex rules without needing to update the binary.
-   - In dev mode, recipe auto-sync is skipped to preserve work-in-progress edits.
-
-#### Phase 3: Native Self-Update & Web Installer (v0.5.0)
+#### Future: Native Self-Update & Web Installer
 1. **Native Self-Update (`rpm self-update`)**:
    - Queries GitHub Releases for new `rpm` releases.
-   - Downloads, verifies SHA-256, and atomically replaces `~/.rpm/bin/rpm` in place.
+   - Downloads, verifies SHA-256, and atomically replaces the installed binary.
    - `rpm update` alerts the user with a pip/brew-style banner when a new version of `rpm` is available.
 2. **One-Liner Web Installer (`install.sh`)**:
    - Installs via `curl -fsSL https://raw.githubusercontent.com/rorymiley/rorys-package-manager/master/install.sh | sh`.
-   - Detects architecture (`arm64` vs `x86_64`), downloads release binary, sets up `~/.rpm/`, seeds recipes, and configures `$PATH`.
+   - Detects architecture (`arm64` vs `x86_64`), downloads release binary, sets up `~/.rpm/`, seeds initial catalog index, and configures `$PATH`.
 
 ---
 
@@ -392,6 +404,14 @@ regex = "(?P<version>[0-9]+(\\.[0-9]+)+)"
   - Fixed installer scripts (`scripts/install-local.sh`, `scripts/uninstall-local.sh`) to detect `$SUDO_USER` and guarantee user ownership on `~/.rpm`, `/opt/rpm`, and cache directories.
   - Enhanced cache write error reporting with actionable `sudo chown` recovery guidance.
   - Bumped version to `0.3.1`.
+
+### 2026-10-02
+- **Roadmap Restructuring & Sparse Catalog Index Architecture**:
+  - Removed rigid version numbers (`v0.4.0`, `v0.5.0`) from future roadmap milestones in favor of feature-driven scopes.
+  - Shifted recipe sync strategy from bulk file mirroring to a Homebrew-inspired **Sparse Catalog Index & On-Demand Fetching** model.
+  - Defined `recipes/index.toml` architecture for centralized lightweight package metadata, alias mappings, and descriptions.
+  - Designed on-demand single recipe fetching via `raw.githubusercontent.com` upon `rpm install <query>`, avoiding GitHub API 60 req/hr rate limits.
+  - Updated `GEMINI.md` to reflect the new future scope.
 
 
 
