@@ -65,25 +65,35 @@ Certain applications cannot coexist safely on macOS (for example, stable `Chromi
 3. **Bidirectional Resolution**: Protects against conflicts whether declared directly on the target recipe or declared by an existing installed recipe against the incoming target.
 4. **Friendly Migration Guidance**: Aborts with clear actionable instructions showing how to uninstall the conflicting package first via `cargo run -- uninstall <app>`.
 
-### Standalone CLI & Filesystem Architecture (V0.3.0 Roadmap)
+### Standalone CLI & Distribution Roadmap (v0.3.0 – v0.5.0)
 
-To transition from running exclusively via `cargo run --` to a standalone CLI tool (`rpm <command>`):
-1. **Cargo Binary Definition**: Defines `[[bin]] name = "rpm" path = "src/main.rs"` so `cargo build` outputs `target/debug/rpm` directly.
+To transition from running exclusively via `cargo run --` to a standalone CLI tool (`rpm <command>`), work is split into three focused milestones:
+
+#### Phase 1: Standalone Binary & Dual-Mode Paths Engine (v0.3.0)
+1. **Cargo Binary Definition**: Defines `[[bin]] name = "rpm" path = "src/main.rs"` in `Cargo.toml` so `cargo build` outputs `target/debug/rpm` and `target/release/rpm` directly.
 2. **Dual-Mode Paths Engine (`src/paths.rs`)**:
    - **Local Dev Mode**: Automatically detected when `./recipes/` and `Cargo.toml` exist in the current working directory (or overridden by `RPM_DEV=1`/`RPM_DIR`). Uses `./recipes/`, `./local/cache.toml`, and `./local/staging/`.
    - **Installed System Mode**: When run outside the repository, uses:
-     - Binary: `~/.rpm/bin/rpm` (added to user `$PATH` in `~/.zshrc`).
+     - Binary: `/opt/rpm/bin/rpm` (added to system `$PATH` via `/etc/paths.d/rpm`).
      - Persistent Recipes: `~/.rpm/recipes/*.toml`.
      - Persistent State: `~/.rpm/cache.toml`.
      - Download Cache: `~/Library/Caches/rpm/staging/` (macOS-compliant purgeable cache; auto-cleaned on disk pressure without breaking `rpm` state).
-3. **Recipe Synchronization in `rpm update`**:
-   - In installed mode, `rpm update` pulls the latest declarative recipes from GitHub into `~/.rpm/recipes/` before checking local versions, ensuring users always have up-to-date download URLs and regex rules without needing to update the binary.
+3. **Local Developer Installer & Uninstaller (`scripts/install-local.sh`, `scripts/uninstall-local.sh`)**:
+   - `install-local.sh`: Compiles release binary (`cargo build --release`), creates `/opt/rpm/bin`, sets permissions (`sudo chown -R $(whoami):admin /opt/rpm`), registers in `/etc/paths.d/rpm`, and seeds `~/.rpm/recipes/`.
+   - `uninstall-local.sh`: Removes `/opt/rpm`, unregisters `/etc/paths.d/rpm`, and interactively prompts whether to clean `~/.rpm` and `~/Library/Caches/rpm`.
+
+
+#### Phase 2: Upstream Recipe Synchronization (v0.4.0)
+1. **Recipe Synchronization in `rpm update`**:
+   - In installed system mode, `rpm update` pulls the latest declarative recipes from GitHub into `~/.rpm/recipes/` before checking local versions, ensuring users always have up-to-date download URLs and regex rules without needing to update the binary.
    - In dev mode, recipe auto-sync is skipped to preserve work-in-progress edits.
-4. **Native Self-Update (`rpm self-update`)**:
+
+#### Phase 3: Native Self-Update & Web Installer (v0.5.0)
+1. **Native Self-Update (`rpm self-update`)**:
    - Queries GitHub Releases for new `rpm` releases.
    - Downloads, verifies SHA-256, and atomically replaces `~/.rpm/bin/rpm` in place.
    - `rpm update` alerts the user with a pip/brew-style banner when a new version of `rpm` is available.
-5. **One-Liner Web Installer (`install.sh`)**:
+2. **One-Liner Web Installer (`install.sh`)**:
    - Installs via `curl -fsSL https://raw.githubusercontent.com/rorymiley/rorys-package-manager/master/install.sh | sh`.
    - Detects architecture (`arm64` vs `x86_64`), downloads release binary, sets up `~/.rpm/`, seeds recipes, and configures `$PATH`.
 
@@ -368,5 +378,13 @@ regex = "(?P<version>[0-9]+(\\.[0-9]+)+)"
   - Updated `src/cache.rs` to serialize and deserialize `local/cache.toml` via `toml::to_string_pretty` and `toml::from_str`.
   - Bumped version to `0.2.1` in `Cargo.toml`.
   - Switched `src/cli.rs` `print_help` to use `env!("CARGO_PKG_VERSION")`, baking the version into the binary at compile time.
-  - Verified all 20 tests pass and CLI commands (`list`, `list-all`, `update`, `help`) execute cleanly.
+  - Re-scoped standalone distribution roadmap into three phased milestones: v0.3.0 (Binary & Dual-Mode Paths), v0.4.0 (Upstream Recipe Synchronization), and v0.5.0 (Native Self-Update & Web Installer).
+  - **Phase 1: Standalone Binary & Dual-Mode Paths Engine (v0.3.0 Implementation)**:
+    - Added `[[bin]] name = "rpm" path = "src/main.rs"` and bumped version to `0.3.0` in `Cargo.toml`.
+    - Implemented `src/paths.rs` supporting automatic Dev Mode (`./recipes`, `./local/cache.toml`, `./local/staging`) and Installed System Mode (`/opt/rpm/bin/rpm`, `~/.rpm/recipes`, `~/.rpm/cache.toml`, `~/Library/Caches/rpm/staging`).
+    - Integrated `paths.rs` into `recipe.rs`, `cache.rs`, `installer.rs`, and `cli.rs`.
+    - Added dynamic `paths::runner_cmd()` formatting messages as `cargo run --` in dev mode and `rpm` in installed mode.
+    - Created `scripts/install-local.sh` and `scripts/uninstall-local.sh` automating release build, system installation with user ownership, clean uninstallation with `~/.rpm` cleanup prompt, and `/etc/paths.d/rpm` management.
+    - Successfully verified system installation, dual-mode execution, and confirmed all 23 unit tests pass.
+
 

@@ -7,6 +7,7 @@ use crate::cache::{self, CachedApp, UpdateCache};
 use crate::installer;
 use crate::local;
 use crate::network;
+use crate::paths;
 use crate::recipe;
 use crate::version::{self, VersionComparison};
 use std::io::Write;
@@ -42,7 +43,7 @@ pub fn run(args: &[String]) -> i32 {
             match app {
                 Some(app) => cmd_install(app, is_verbose, is_clean),
                 None => {
-                    eprintln!("\x1b[31mUsage:\x1b[0m cargo run -- install [-v] [-c] <app>");
+                    eprintln!("\x1b[31mUsage:\x1b[0m {} install [-v] [-c] <app>", paths::runner_cmd());
                     1
                 }
             }
@@ -50,7 +51,7 @@ pub fn run(args: &[String]) -> i32 {
         "uninstall" => match args.get(2) {
             Some(app) => cmd_uninstall(app),
             None => {
-                eprintln!("\x1b[31mUsage:\x1b[0m cargo run -- uninstall <app>");
+                eprintln!("\x1b[31mUsage:\x1b[0m {} uninstall <app>", paths::runner_cmd());
                 1
             }
         },
@@ -110,11 +111,14 @@ fn print_help() {
         tracked_names.join("\n  ")
     };
 
+    let cmd = paths::runner_cmd();
+    let mode_str = if paths::is_dev_mode() { " [dev mode]" } else { "" };
+
     println!(
-        "\x1b[1mrorys-package-manager\x1b[0m (v{version}) — unsigned macOS app package manager
+        "\x1b[1mrorys-package-manager\x1b[0m (v{version}{mode_str}) — unsigned macOS app package manager
 
 \x1b[1mUsage:\x1b[0m
-  cargo run -- <command> [app]
+  {cmd} <command> [app]
 
 \x1b[1mCommands:\x1b[0m
   update [-v]            Check installed apps against upstream, evaluate versions, and write update cache
@@ -130,17 +134,17 @@ fn print_help() {
   {available_recipes}
 
 \x1b[1mExamples:\x1b[0m
-  cargo run -- update
-  cargo run -- update -v
-  cargo run -- list
-  cargo run -- list -v
-  cargo run -- list-all
-  cargo run -- install qbt
-  cargo run -- install -c qbt
-  cargo run -- cleanup
-  cargo run -- cleanup librewolf
-  cargo run -- upgrade
-  cargo run -- uninstall qbittorrent
+  {cmd} update
+  {cmd} update -v
+  {cmd} list
+  {cmd} list -v
+  {cmd} list-all
+  {cmd} install qbt
+  {cmd} install -c qbt
+  {cmd} cleanup
+  {cmd} cleanup librewolf
+  {cmd} upgrade
+  {cmd} uninstall qbittorrent
 "
     );
 }
@@ -206,7 +210,7 @@ fn cmd_list(verbose: bool) -> i32 {
 
     if installed_recipes.is_empty() {
         println!("\x1b[1;34m==>\x1b[0m No packages currently installed.");
-        println!("    Run \x1b[1mcargo run -- list-all\x1b[0m to see available packages to install.");
+        println!("    Run \x1b[1m{} list-all\x1b[0m to see available packages to install.", paths::runner_cmd());
         return 0;
     }
 
@@ -260,7 +264,8 @@ fn cmd_upgrade(verbose: bool, clean: bool) -> i32 {
     match installer::upgrade_pending(verbose, clean) {
         Ok(0) => {
             println!(
-                "\x1b[1;34m==>\x1b[0m Nothing to upgrade. Run \x1b[1mcargo run -- update\x1b[0m if you expect changes."
+                "\x1b[1;34m==>\x1b[0m Nothing to upgrade. Run \x1b[1m{} update\x1b[0m if you expect changes.",
+                paths::runner_cmd()
             );
             0
         }
@@ -321,12 +326,13 @@ fn cmd_install(query: &str, verbose: bool, clean: bool) -> i32 {
              For security and system integrity, rpm will not overwrite applications installed outside this package manager.\n\
              To manage '{}' with rpm:\n  \
              1. Uninstall or remove '/Applications/{}' (e.g. drag to Trash or run: rm -rf '/Applications/{}')\n  \
-             2. Reinstall via rpm: cargo run -- install {}",
+             2. Reinstall via rpm: {} install {}",
             recipe.name,
             clean_bundle,
             recipe.name,
             clean_bundle,
             clean_bundle,
+            paths::runner_cmd(),
             alias
         );
         return 1;
@@ -427,7 +433,7 @@ fn cmd_update(verbose: bool) -> i32 {
 
     if installed_recipes.is_empty() {
         println!("\x1b[1;34m==>\x1b[0m No installed packages found to check.");
-        println!("    Run \x1b[1mcargo run -- list-all\x1b[0m to see available packages to install.");
+        println!("    Run \x1b[1m{} list-all\x1b[0m to see available packages to install.", paths::runner_cmd());
         return 0;
     }
 
@@ -474,7 +480,8 @@ fn cmd_update(verbose: bool) -> i32 {
                                     effective_local, remote_version
                                 );
                                 println!(
-                                    "     \x1b[90mSkipping updates. To manage with rpm, uninstall it from /Applications and run 'cargo run -- install {}'.\x1b[0m",
+                                    "     \x1b[90mSkipping updates. To manage with rpm, uninstall it from /Applications and run '{} install {}'.\x1b[0m",
+                                    paths::runner_cmd(),
                                     recipe.aliases.first().unwrap_or(&recipe.name.to_lowercase())
                                 );
                             } else {
@@ -574,7 +581,7 @@ fn cmd_update(verbose: bool) -> i32 {
     if verbose {
         println!(
             "\n\x1b[1;34m==>\x1b[0m Wrote update cache → \x1b[1m{}\x1b[0m",
-            cache::CACHE_PATH
+            cache::cache_file_path().display()
         );
         println!(
             "\x1b[1;34m==>\x1b[0m Managed installs: \x1b[1m{}\x1b[0m",
@@ -588,8 +595,9 @@ fn cmd_update(verbose: bool) -> i32 {
         println!("\x1b[1;34m==>\x1b[0m All tracked apps are up to date.");
     } else {
         println!(
-            "\x1b[1;34m==>\x1b[0m {} update(s) available. Run \x1b[1mcargo run -- upgrade\x1b[0m when ready.",
-            pending
+            "\x1b[1;34m==>\x1b[0m {} update(s) available. Run \x1b[1m{} upgrade\x1b[0m when ready.",
+            pending,
+            paths::runner_cmd()
         );
     }
 

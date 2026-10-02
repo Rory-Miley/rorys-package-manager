@@ -3,9 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Project-local update index written by `update` / `install` and read by `upgrade` / installer.
-/// Path: `<repo>/local/cache.toml` (relative to the process working directory for now).
-pub const CACHE_PATH: &str = "local/cache.toml";
+use crate::paths;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedApp {
@@ -75,7 +73,7 @@ fn now_unix() -> u64 {
 }
 
 pub fn cache_file_path() -> PathBuf {
-    PathBuf::from(CACHE_PATH)
+    paths::cache_file_path()
 }
 
 /// Ensures `local/` exists, then writes the update cache as pretty TOML.

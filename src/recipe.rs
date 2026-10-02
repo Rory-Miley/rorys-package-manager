@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const RECIPES_DIR: &str = "recipes";
+use crate::paths;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Recipe {
@@ -93,9 +93,9 @@ impl Recipe {
     }
 }
 
-/// Loads all recipes from the recipes directory.
+/// Loads all recipes from the active recipes directory.
 pub fn load_recipes() -> Result<Vec<Recipe>, String> {
-    load_recipes_from_dir(Path::new(RECIPES_DIR))
+    load_recipes_from_dir(&paths::recipes_dir())
 }
 
 pub fn load_recipes_from_dir(dir: &Path) -> Result<Vec<Recipe>, String> {

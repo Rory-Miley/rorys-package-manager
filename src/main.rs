@@ -3,6 +3,7 @@ mod cli;
 mod installer;
 mod local;
 mod network;
+pub mod paths;
 pub mod progress;
 mod recipe;
 mod version;

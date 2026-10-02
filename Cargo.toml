@@ -1,7 +1,11 @@
 [package]
 name = "rorys-package-manager"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
+
+[[bin]]
+name = "rpm"
+path = "src/main.rs"
 
 [dependencies]
 # Tokio providdes the async engine for URL checking

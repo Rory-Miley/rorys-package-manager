@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-const STAGING_DIR: &str = "local/staging";
+use crate::paths;
 
 /// Reads the update cache that `update` wrote to `local/cache.toml`.
 pub fn load_update_cache() -> Result<UpdateCache, String> {
@@ -28,8 +28,9 @@ pub fn apps_ready_to_upgrade() -> Result<Vec<CachedApp>, String> {
 pub fn upgrade_pending(verbose: bool, clean: bool) -> Result<usize, String> {
     let pending = apps_ready_to_upgrade().map_err(|e| {
         format!(
-            "{}\nRun \x1b[1mcargo run -- update\x1b[0m first to refresh the cache.",
-            e
+            "{}\nRun \x1b[1m{} update\x1b[0m first to refresh the cache.",
+            e,
+            paths::runner_cmd()
         )
     })?;
 
@@ -146,7 +147,8 @@ pub fn check_conflicting_apps(recipe: &Recipe, recipes: &[Recipe]) -> Result<(),
                         .map(|s| s.as_str())
                         .unwrap_or(&other.name);
                     format!(
-                        "To resolve this, uninstall it first:\n  cargo run -- uninstall {}",
+                        "To resolve this, uninstall it first:\n  {} uninstall {}",
+                        paths::runner_cmd(),
                         alias
                     )
                 } else {
@@ -184,7 +186,8 @@ fn check_one_conflict(recipe: &Recipe, conflict: &str, recipes: &[Recipe]) -> Op
                     .map(|s| s.as_str())
                     .unwrap_or(&target_recipe.name);
                 format!(
-                    "To resolve this, uninstall it first:\n  cargo run -- uninstall {}",
+                    "To resolve this, uninstall it first:\n  {} uninstall {}",
+                    paths::runner_cmd(),
                     alias
                 )
             } else {
@@ -210,7 +213,8 @@ fn check_one_conflict(recipe: &Recipe, conflict: &str, recipes: &[Recipe]) -> Op
             let is_managed = cache::was_managed(conflict) || cache::was_managed(&clean_bundle);
             let uninstall_hint = if is_managed {
                 format!(
-                    "To resolve this, uninstall it first:\n  cargo run -- uninstall {}",
+                    "To resolve this, uninstall it first:\n  {} uninstall {}",
+                    paths::runner_cmd(),
                     conflict
                 )
             } else {
@@ -256,8 +260,8 @@ pub fn install_recipe(
              For security and system integrity, rpm will not overwrite applications installed outside this package manager.\n\
              To manage '{}' with rpm:\n  \
              1. Uninstall or remove '/Applications/{}' (e.g. drag to Trash or run: rm -rf '/Applications/{}')\n  \
-             2. Reinstall via rpm: cargo run -- install {}",
-            recipe.name, clean_bundle, recipe.name, clean_bundle, clean_bundle, alias
+             2. Reinstall via rpm: {} install {}",
+            recipe.name, clean_bundle, recipe.name, clean_bundle, clean_bundle, paths::runner_cmd(), alias
         ));
     }
 
@@ -345,9 +349,10 @@ pub fn uninstall_app(name: &str) -> Result<(), String> {
         None => {
             return Err(format!(
                 "{} is not in {} as a managed package.\n\
-                 Install it first with \x1b[1mcargo run -- install {}\x1b[0m",
+                 Install it first with \x1b[1m{} install {}\x1b[0m",
                 name,
-                cache::CACHE_PATH,
+                cache::cache_file_path().display(),
+                paths::runner_cmd(),
                 name
             ));
         }
@@ -433,12 +438,13 @@ fn install_bundle_pipeline(
              For security and system integrity, rpm will not overwrite applications installed outside this package manager.\n\
              To manage '{}' with rpm:\n  \
              1. Uninstall or remove '/Applications/{}' (e.g. drag to Trash or run: rm -rf '/Applications/{}')\n  \
-             2. Reinstall via rpm: cargo run -- install {}",
+             2. Reinstall via rpm: {} install {}",
             name,
             clean_bundle,
             name,
             clean_bundle,
             clean_bundle,
+            paths::runner_cmd(),
             name.to_lowercase()
         ));
     }
@@ -459,12 +465,13 @@ fn install_bundle_pipeline(
 }
 
 fn staging_path() -> PathBuf {
-    PathBuf::from(STAGING_DIR)
+    paths::staging_dir()
 }
 
 fn ensure_staging() -> Result<(), String> {
-    fs::create_dir_all(staging_path())
-        .map_err(|e| format!("Failed to create staging dir {}: {}", STAGING_DIR, e))
+    let dir = staging_path();
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create staging dir {}: {}", dir.display(), e))
 }
 
 fn sanitize(name: &str) -> String {
