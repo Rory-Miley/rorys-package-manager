@@ -386,5 +386,12 @@ regex = "(?P<version>[0-9]+(\\.[0-9]+)+)"
     - Added dynamic `paths::runner_cmd()` formatting messages as `cargo run --` in dev mode and `rpm` in installed mode.
     - Created `scripts/install-local.sh` and `scripts/uninstall-local.sh` automating release build, system installation with user ownership, clean uninstallation with `~/.rpm` cleanup prompt, and `/etc/paths.d/rpm` management.
     - Successfully verified system installation, dual-mode execution, and confirmed all 23 unit tests pass.
+- **V0.3.1 Progress Bar Stability & Permission Fixes**:
+  - Eliminated download progress bar jitter: fixed-width formatting for speed (`{:>10}`), downloaded MB padding relative to total, and uniform ETA (`{:>6}`), keeping bracket positions invariant across speed and byte changes while dynamically scaling with terminal resize.
+  - Added unit tests verifying stable bar lengths across speeds (0 B/s to 1 GB/s) and byte progress.
+  - Fixed installer scripts (`scripts/install-local.sh`, `scripts/uninstall-local.sh`) to detect `$SUDO_USER` and guarantee user ownership on `~/.rpm`, `/opt/rpm`, and cache directories.
+  - Enhanced cache write error reporting with actionable `sudo chown` recovery guidance.
+  - Bumped version to `0.3.1`.
+
 
 

@@ -87,8 +87,23 @@ pub fn save_cache(cache: &UpdateCache) -> Result<(), String> {
     let toml_str = toml::to_string_pretty(cache)
         .map_err(|e| format!("Failed to serialise cache: {}", e))?;
 
-    fs::write(&path, toml_str).map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+    fs::write(&path, toml_str).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            let dir_hint = path
+                .parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| path.display().to_string());
+            format!(
+                "Failed to write {}: Permission denied. Directory or file is not writable. Try running: sudo chown -R $(whoami) {}",
+                path.display(),
+                dir_hint
+            )
+        } else {
+            format!("Failed to write {}: {}", path.display(), e)
+        }
+    })?;
     Ok(())
+
 }
 
 /// Loads `local/cache.toml`. Returns an error if missing or invalid.

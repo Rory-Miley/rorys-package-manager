@@ -140,16 +140,19 @@ pub fn render_progress_line(
         let downloaded_mb = downloaded as f64 / 1_048_576.0;
         let avg_speed = downloaded as f64 / elapsed_secs;
         if total.is_some() {
+            let tot_str = format!("{:.1}", total_mb);
+            let num_width = tot_str.len();
             format!(
-                "{:.1} / {:.1} MB • {} in {:.1}s",
+                "{:>width$.1} / {} MB • {:>10} in {:.1}s",
                 downloaded_mb,
-                total_mb,
+                tot_str,
                 format_speed(avg_speed),
-                elapsed_secs
+                elapsed_secs,
+                width = num_width
             )
         } else {
             format!(
-                "{:.1} MB • {} in {:.1}s",
+                "{:>6.1} MB • {:>10} in {:.1}s",
                 downloaded_mb,
                 format_speed(avg_speed),
                 elapsed_secs
@@ -158,17 +161,20 @@ pub fn render_progress_line(
     } else {
         let downloaded_mb = downloaded as f64 / 1_048_576.0;
         let mb_str = if let Some(tot) = total {
-            format!("{:.1} / {:.1} MB", downloaded_mb, tot as f64 / 1_048_576.0)
+            let tot_mb = tot as f64 / 1_048_576.0;
+            let tot_str = format!("{:.1}", tot_mb);
+            let num_width = tot_str.len();
+            format!("{:>width$.1} / {} MB", downloaded_mb, tot_str, width = num_width)
         } else {
-            format!("{:.1} MB", downloaded_mb)
+            format!("{:>6.1} MB", downloaded_mb)
         };
-        let speed_str = format_speed(speed);
+        let speed_str = format!("{:>10}", format_speed(speed));
         let eta_str = if let Some(tot) = total {
             if speed > 0.0 && tot > downloaded {
                 let remaining = (tot - downloaded) as f64 / speed;
-                format_eta(remaining)
+                format!("{:>6}", format_eta(remaining))
             } else {
-                "--:--".to_string()
+                " --:--".to_string()
             }
         } else {
             "".to_string()
@@ -194,9 +200,12 @@ pub fn render_progress_line(
     } else {
         // Fallback: compact right text (MB only)
         let compact_mb = if let Some(tot) = total {
-            format!("{:.1}/{:.1}MB", downloaded as f64 / 1_048_576.0, tot as f64 / 1_048_576.0)
+            let tot_mb = tot as f64 / 1_048_576.0;
+            let tot_str = format!("{:.1}", tot_mb);
+            let num_width = tot_str.len();
+            format!("{:>width$.1}/{}MB", downloaded as f64 / 1_048_576.0, tot_str, width = num_width)
         } else {
-            format!("{:.1}MB", downloaded as f64 / 1_048_576.0)
+            format!("{:>5.1}MB", downloaded as f64 / 1_048_576.0)
         };
         let compact_width = visible_width(&compact_mb);
         let compact_overhead = 8 + prefix_width + compact_width;
@@ -284,7 +293,9 @@ pub fn get_terminal_width() -> usize {
 }
 
 pub fn format_speed(bps: f64) -> String {
-    if bps >= 1_048_576.0 {
+    if bps >= 1_073_741_824.0 {
+        format!("{:.1} GB/s", bps / 1_073_741_824.0)
+    } else if bps >= 1_048_576.0 {
         format!("{:.1} MB/s", bps / 1_048_576.0)
     } else if bps >= 1024.0 {
         format!("{:.1} KB/s", bps / 1024.0)
@@ -302,8 +313,10 @@ pub fn format_eta(seconds: f64) -> String {
     let mins = (total_secs % 3600) / 60;
     let secs = total_secs % 60;
 
-    if hours > 0 {
-        format!("{:02}:{:02}:{:02}", hours, mins, secs)
+    if hours >= 100 {
+        ">99h ".to_string()
+    } else if hours > 0 {
+        format!("{:>2}h{:02}m", hours, mins)
     } else {
         format!("{:02}:{:02}", mins, secs)
     }
@@ -324,7 +337,8 @@ mod tests {
     fn test_format_eta() {
         assert_eq!(format_eta(4.0), "00:04");
         assert_eq!(format_eta(65.0), "01:05");
-        assert_eq!(format_eta(3665.0), "01:01:05");
+        assert_eq!(format_eta(3665.0), " 1h01m");
+        assert_eq!(format_eta(100_000.0), "27h46m");
         assert_eq!(format_eta(-1.0), "--:--");
         assert_eq!(format_eta(f64::NAN), "--:--");
     }
@@ -433,6 +447,87 @@ mod tests {
                 80,
             );
             println!("{}", line);
+        }
+    }
+
+    #[test]
+    fn test_render_progress_line_stable_bar_length_across_speeds() {
+        let mut marquee = 0;
+        let speeds = [
+            0.0,
+            500.0,
+            1024.0,
+            1_048_576.0,     // 1 MB/s
+            10_485_760.0,    // 10 MB/s
+            104_857_600.0,   // 100 MB/s
+            1_073_741_824.0, // 1 GB/s
+        ];
+        let mut expected_bar_len = None;
+        for &spd in &speeds {
+            let line = render_progress_line(
+                50_000_000,
+                Some(100_000_000),
+                spd,
+                Duration::from_secs(5),
+                false,
+                &mut marquee,
+                100,
+            );
+            let start = line.find('[').unwrap();
+            let end = line.find(']').unwrap();
+            let re = regex::Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap();
+            let bar_inner = re.replace_all(&line[start + 1..end], "");
+            let bar_len = bar_inner.chars().count();
+            if let Some(expected) = expected_bar_len {
+                assert_eq!(
+                    bar_len, expected,
+                    "Bar length changed from {} to {} at speed {}",
+                    expected, bar_len, spd
+                );
+            } else {
+                expected_bar_len = Some(bar_len);
+            }
+        }
+    }
+
+    #[test]
+    fn test_render_progress_line_stable_bar_length_across_progress() {
+        let mut marquee = 0;
+        let total = 120_000_000u64; // ~114.4 MB
+        let bytes_points = [
+            100_000,     // 0.1 MB
+            1_000_000,   // 1.0 MB
+            9_900_000,   // 9.4 MB
+            10_500_000,  // 10.0 MB
+            99_000_000,  // 94.4 MB
+            110_000_000, // 104.9 MB
+            119_000_000, // 113.5 MB
+        ];
+        let mut expected_bar_len = None;
+        for &dl in &bytes_points {
+            let line = render_progress_line(
+                dl,
+                Some(total),
+                5_000_000.0,
+                Duration::from_secs(5),
+                false,
+                &mut marquee,
+                100,
+            );
+            let start = line.find('[').unwrap();
+            let end = line.find(']').unwrap();
+            let re = regex::Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap();
+            let bar_inner = re.replace_all(&line[start + 1..end], "");
+            let bar_len = bar_inner.chars().count();
+            if let Some(expected) = expected_bar_len {
+                assert_eq!(
+                    bar_len, expected,
+                    "Bar length changed from {} to {} at downloaded bytes {}",
+                    expected, bar_len, dl
+                );
+            } else {
+                expected_bar_len = Some(bar_len);
+            }
         }
     }
 }

@@ -4,10 +4,17 @@ set -e
 # Rory's Package Manager (rpm) — Local Developer Uninstaller
 # Removes /opt/rpm, /etc/paths.d/rpm, and prompts to remove ~/.rpm
 
+# Determine the real user and home directory (even if invoked with sudo)
+if [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ]; then
+    USER_HOME=$(eval echo "~$SUDO_USER")
+else
+    USER_HOME="$HOME"
+fi
+
 OPT_DIR="/opt/rpm"
 PATHS_FILE="/etc/paths.d/rpm"
-USER_RPM_DIR="$HOME/.rpm"
-CACHE_DIR="$HOME/Library/Caches/rpm"
+USER_RPM_DIR="$USER_HOME/.rpm"
+CACHE_DIR="$USER_HOME/Library/Caches/rpm"
 
 echo -e "\033[1;34m==>\033[0m \033[1mUninstalling Rory's Package Manager (rpm)...\033[0m"
 
