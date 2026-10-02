@@ -1,0 +1,13 @@
+name = "qBittorrent"
+aliases = ["qbittorrent", "qbt"]
+bundle_name = "qBittorrent.app"
+homepage = "https://www.qbittorrent.org"
+description = "BitTorrent client with a Qt user interface"
+quarantine_strip = true
+
+[source]
+type = "github_release"
+locator = "qbittorrent/qBittorrent"
+
+[livecheck]
+strategy = "github_latest_release"

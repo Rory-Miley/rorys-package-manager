@@ -1,0 +1,13 @@
+name = "LibreWolf"
+aliases = ["librewolf", "libre-wolf", "libwolf"]
+bundle_name = "LibreWolf.app"
+homepage = "https://www.librewolf.net"
+description = "Custom Firefox-focused open-source browser project"
+quarantine_strip = true
+
+[source]
+type = "codeberg_release"
+locator = "librewolf/bsys6"
+
+[livecheck]
+strategy = "codeberg_latest_release"

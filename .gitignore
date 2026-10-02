@@ -2,6 +2,7 @@
 
 # Update index written by `rpm update` (machine-local; do not commit)
 /local/cache.json
+/local/cache.toml
 
 # Downloaded archives + extract/mount workspace used by `upgrade`
 /local/staging/

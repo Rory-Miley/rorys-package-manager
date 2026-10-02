@@ -10,7 +10,7 @@ use std::time::Duration;
 
 const STAGING_DIR: &str = "local/staging";
 
-/// Reads the update cache that `update` wrote to `local/cache.json`.
+/// Reads the update cache that `update` wrote to `local/cache.toml`.
 pub fn load_update_cache() -> Result<UpdateCache, String> {
     cache::load_cache()
 }
@@ -1069,7 +1069,7 @@ fn install_app_bundle_atomic(
     }
 }
 
-/// Record that rpm owns this install in `local/cache.json`.
+/// Record that rpm owns this install in `local/cache.toml`.
 fn mark_managed(
     name: &str,
     local_version: &str,

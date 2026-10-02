@@ -111,10 +111,10 @@ pub fn load_recipes_from_dir(dir: &Path) -> Result<Vec<Recipe>, String> {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) == Some("json") {
+        if path.extension().and_then(|s| s.to_str()) == Some("toml") {
             let content = fs::read_to_string(&path)
                 .map_err(|e| format!("Failed to read recipe file {}: {}", path.display(), e))?;
-            let recipe: Recipe = serde_json::from_str(&content)
+            let recipe: Recipe = toml::from_str(&content)
                 .map_err(|e| format!("Failed to parse recipe {}: {}", path.display(), e))?;
             recipes.push(recipe);
         }
@@ -136,22 +136,22 @@ mod tests {
 
     #[test]
     fn test_parse_qbittorrent_recipe() {
-        let json = r#"{
-            "name": "qBittorrent",
-            "aliases": ["qbittorrent", "qbt"],
-            "bundle_name": "qBittorrent.app",
-            "homepage": "https://www.qbittorrent.org",
-            "quarantine_strip": true,
-            "source": {
-                "type": "github_release",
-                "locator": "qbittorrent/qBittorrent"
-            },
-            "livecheck": {
-                "strategy": "github_latest_release"
-            }
-        }"#;
+        let toml_str = r#"
+            name = "qBittorrent"
+            aliases = ["qbittorrent", "qbt"]
+            bundle_name = "qBittorrent.app"
+            homepage = "https://www.qbittorrent.org"
+            quarantine_strip = true
 
-        let recipe: Recipe = serde_json::from_str(json).expect("Failed to deserialize recipe");
+            [source]
+            type = "github_release"
+            locator = "qbittorrent/qBittorrent"
+
+            [livecheck]
+            strategy = "github_latest_release"
+        "#;
+
+        let recipe: Recipe = toml::from_str(toml_str).expect("Failed to deserialize recipe");
         assert_eq!(recipe.name, "qBittorrent");
         assert!(recipe.matches("qbt"));
         assert!(recipe.matches("qbittorrent"));
@@ -163,26 +163,34 @@ mod tests {
 
     #[test]
     fn test_parse_conflicting_applications() {
-        let json_a = r#"{
-            "name": "Chromium",
-            "bundle_name": "Chromium.app",
-            "conflicting_applications": ["Chromium Snapshot"],
-            "source": { "type": "chromium_snapshot" },
-            "livecheck": { "strategy": "github_latest_release" }
-        }"#;
+        let toml_a = r#"
+            name = "Chromium"
+            bundle_name = "Chromium.app"
+            conflicting_applications = ["Chromium Snapshot"]
 
-        let recipe_a: Recipe = serde_json::from_str(json_a).expect("Failed to deserialize recipe");
+            [source]
+            type = "chromium_snapshot"
+
+            [livecheck]
+            strategy = "github_latest_release"
+        "#;
+
+        let recipe_a: Recipe = toml::from_str(toml_a).expect("Failed to deserialize recipe");
         assert_eq!(recipe_a.conflicting_applications, vec!["Chromium Snapshot"]);
 
-        let json_b = r#"{
-            "name": "Chromium Snapshot",
-            "bundle_name": "Chromium Snapshot.app",
-            "conflicts_with": ["Chromium"],
-            "source": { "type": "chromium_snapshot" },
-            "livecheck": { "strategy": "github_latest_release" }
-        }"#;
+        let toml_b = r#"
+            name = "Chromium Snapshot"
+            bundle_name = "Chromium Snapshot.app"
+            conflicts_with = ["Chromium"]
 
-        let recipe_b: Recipe = serde_json::from_str(json_b).expect("Failed to deserialize recipe");
+            [source]
+            type = "chromium_snapshot"
+
+            [livecheck]
+            strategy = "github_latest_release"
+        "#;
+
+        let recipe_b: Recipe = toml::from_str(toml_b).expect("Failed to deserialize recipe");
         assert_eq!(recipe_b.conflicting_applications, vec!["Chromium"]);
     }
 }

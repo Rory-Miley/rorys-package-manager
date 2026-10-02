@@ -1,0 +1,15 @@
+name = "Chromium Snapshot"
+aliases = ["chromium-snapshot", "chrome-snapshot", "snapshot-chromium"]
+bundle_name = "Chromium Snapshot.app"
+homepage = "https://www.chromium.org"
+description = "Continuous bleeding-edge snapshot build of Chromium"
+quarantine_strip = true
+conflicting_applications = ["Chromium"]
+
+[source]
+type = "chromium_snapshot"
+channel = "auto"
+
+[livecheck]
+strategy = "raw_url"
+url = "https://commondatastorage.googleapis.com/chromium-browser-snapshots/Mac_Arm/LAST_CHANGE"

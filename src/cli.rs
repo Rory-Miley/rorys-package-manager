@@ -103,8 +103,15 @@ fn print_help() {
         })
         .collect();
 
+    let version = env!("CARGO_PKG_VERSION");
+    let available_recipes = if tracked_names.is_empty() {
+        "None found in recipes/".to_string()
+    } else {
+        tracked_names.join("\n  ")
+    };
+
     println!(
-        "\x1b[1mrorys-package-manager\x1b[0m (v2) — unsigned macOS app package manager
+        "\x1b[1mrorys-package-manager\x1b[0m (v{version}) — unsigned macOS app package manager
 
 \x1b[1mUsage:\x1b[0m
   cargo run -- <command> [app]
@@ -120,7 +127,7 @@ fn print_help() {
   help                   Show this message
 
 \x1b[1mAvailable Recipes:\x1b[0m
-  {}
+  {available_recipes}
 
 \x1b[1mExamples:\x1b[0m
   cargo run -- update
@@ -134,12 +141,7 @@ fn print_help() {
   cargo run -- cleanup librewolf
   cargo run -- upgrade
   cargo run -- uninstall qbittorrent
-",
-        if tracked_names.is_empty() {
-            "None found in recipes/".to_string()
-        } else {
-            tracked_names.join("\n  ")
-        }
+"
     );
 }
 
@@ -251,7 +253,7 @@ fn cmd_list_all(verbose: bool) -> i32 {
     0
 }
 
-/// `rpm upgrade` — read `local/cache.json`, download + verify + install pending apps.
+/// `rpm upgrade` — read `local/cache.toml`, download + verify + install pending apps.
 fn cmd_upgrade(verbose: bool, clean: bool) -> i32 {
     println!("\x1b[1;34m==>\x1b[0m \x1b[1mUpgrading apps from update cache...\x1b[0m");
 
@@ -398,7 +400,7 @@ fn cmd_uninstall(query: &str) -> i32 {
     }
 }
 
-/// `rpm update` — check remotes, compare versions with >, and write `local/cache.json`.
+/// `rpm update` — check remotes, compare versions with >, and write `local/cache.toml`.
 fn cmd_update(verbose: bool) -> i32 {
     if verbose {
         let arch = network::detect_mac_architecture();

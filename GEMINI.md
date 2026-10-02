@@ -26,7 +26,7 @@ A macOS CLI package manager (`rpm`) for **unsigned** and custom macOS apps: chec
 | Don't break | Atomic directory swap, backup/rollback, running app checks, unmanaged app protection |
 | Be fast | Reasonable timeouts, stream downloads with single-pass hashing |
 | Easy to install | Low friction to get `rpm` onto a machine |
-| Recipe-driven | Declarative JSON recipes decoupled from host APIs |
+| Recipe-driven | Declarative TOML recipes decoupled from host APIs |
 | Stay in scope | Drive work from this file; expand only with user OK |
 
 ---
@@ -37,7 +37,7 @@ A macOS CLI package manager (`rpm`) for **unsigned** and custom macOS apps: chec
 
 | Command | Behavior |
 |---|---|
-| `rpm update [-v]` | Scan locally installed apps, check upstream versions; skip updates for unmanaged apps; write `local/cache.json` (`-v` for verbose output including download URLs, expected SHA-256 hashes, and architecture) |
+| `rpm update [-v]` | Scan locally installed apps, check upstream versions; skip updates for unmanaged apps; write `local/cache.toml` (`-v` for verbose output including download URLs, expected SHA-256 hashes, and architecture) |
 | `rpm upgrade [-v] [-c]` | Read cache, download, verify SHA-256, and install pending **managed** apps (`-v` for verbose output, `-c` to bypass cached payloads and force clean download) |
 | `rpm install [-v] [-c] <app>` | Resolve recipe; check compatibility conflicts; refuse if target exists but is unmanaged; install atomically and mark `managed` (`-v` for verbose output, `-c` for clean install) |
 | `rpm uninstall <app>` | Safely remove a **managed** app from `/Applications` and clear `managed` in cache |
@@ -70,11 +70,11 @@ Certain applications cannot coexist safely on macOS (for example, stable `Chromi
 To transition from running exclusively via `cargo run --` to a standalone CLI tool (`rpm <command>`):
 1. **Cargo Binary Definition**: Defines `[[bin]] name = "rpm" path = "src/main.rs"` so `cargo build` outputs `target/debug/rpm` directly.
 2. **Dual-Mode Paths Engine (`src/paths.rs`)**:
-   - **Local Dev Mode**: Automatically detected when `./recipes/` and `Cargo.toml` exist in the current working directory (or overridden by `RPM_DEV=1`/`RPM_DIR`). Uses `./recipes/`, `./local/cache.json`, and `./local/staging/`.
+   - **Local Dev Mode**: Automatically detected when `./recipes/` and `Cargo.toml` exist in the current working directory (or overridden by `RPM_DEV=1`/`RPM_DIR`). Uses `./recipes/`, `./local/cache.toml`, and `./local/staging/`.
    - **Installed System Mode**: When run outside the repository, uses:
      - Binary: `~/.rpm/bin/rpm` (added to user `$PATH` in `~/.zshrc`).
-     - Persistent Recipes: `~/.rpm/recipes/*.json`.
-     - Persistent State: `~/.rpm/cache.json`.
+     - Persistent Recipes: `~/.rpm/recipes/*.toml`.
+     - Persistent State: `~/.rpm/cache.toml`.
      - Download Cache: `~/Library/Caches/rpm/staging/` (macOS-compliant purgeable cache; auto-cleaned on disk pressure without breaking `rpm` state).
 3. **Recipe Synchronization in `rpm update`**:
    - In installed mode, `rpm update` pulls the latest declarative recipes from GitHub into `~/.rpm/recipes/` before checking local versions, ensuring users always have up-to-date download URLs and regex rules without needing to update the binary.
@@ -89,38 +89,36 @@ To transition from running exclusively via `cargo run --` to a standalone CLI to
 
 ---
 
-## How to Add New Packages (JSON Recipe Guide)
+## How to Add New Packages (TOML Recipe Guide)
 
-Package recipes live in the `recipes/` directory as individual JSON files (`recipes/<app_name>.json`). Adding a new package requires **zero Rust recompilation**.
+Package recipes live in the `recipes/` directory as individual TOML files (`recipes/<app_name>.toml`). Adding a new package requires **zero Rust recompilation**.
 
-### Recipe JSON Schema
+### Recipe TOML Schema
 
-```json
-{
-  "name": "CanonicalDisplayName",
-  "aliases": ["alias1", "alias2"],
-  "bundle_name": "ApplicationName.app",
-  "homepage": "https://example.com",
-  "description": "Short description of the software",
-  "quarantine_strip": true,
-  "sha256": "optional_expected_sha256_hash",
-  "conflicting_applications": ["ConflictingAppOrAlias"],
-  "source": {
-    "type": "github_release | codeberg_release | chromium_snapshot | direct_url",
-    "locator": "owner/repository",
-    "asset_filter": {
-      "arm64": "regex_pattern_for_apple_silicon",
-      "x86_64": "regex_pattern_for_intel",
-      "fallback": "regex_pattern_fallback"
-    }
-  },
-  "livecheck": {
-    "strategy": "github_latest_release | codeberg_latest_release | chromium_dash | raw_url | regex_scrape",
-    "channel": "Stable",
-    "url": "https://example.com/downloads",
-    "regex": "(?P<version>[0-9]+(\\.[0-9]+)+)"
-  }
-}
+```toml
+name = "CanonicalDisplayName"
+aliases = ["alias1", "alias2"]
+bundle_name = "ApplicationName.app"
+homepage = "https://example.com"
+description = "Short description of the software"
+quarantine_strip = true
+sha256 = "optional_expected_sha256_hash"
+conflicting_applications = ["ConflictingAppOrAlias"]
+
+[source]
+type = "github_release | codeberg_release | chromium_snapshot | direct_url"
+locator = "owner/repository"
+
+[source.asset_filter]
+arm64 = "regex_pattern_for_apple_silicon"
+x86_64 = "regex_pattern_for_intel"
+fallback = "regex_pattern_fallback"
+
+[livecheck]
+strategy = "github_latest_release | codeberg_latest_release | chromium_dash | raw_url | regex_scrape"
+channel = "Stable"
+url = "https://example.com/downloads"
+regex = "(?P<version>[0-9]+(\\.[0-9]+)+)"
 ```
 
 ### Fields Reference
@@ -136,10 +134,10 @@ Package recipes live in the `recipes/` directory as individual JSON files (`reci
 7. **`sha256`** *(String, optional)*: Expected SHA-256 hash. If provided, the installer strictly verifies the download against this hash before mounting or staging.
 8. **`conflicting_applications`** *(Array of Strings, optional)*: Canonical names, aliases, or bundle names of applications that cannot be installed alongside this package (e.g. `["Chromium Snapshot"]`). Supports aliases: `conflicts_with`, `conflicts`, `conflicting_apps`.
 9. **`source`** *(Object, required)*:
-   - **`github_release`**: GitHub repository (`locator: "owner/repo"`). Automatically scans recent releases for valid macOS containers (`.dmg`, `.zip`, `.tar.gz`, `.tar.xz`). Supports optional regex `asset_filter`.
-   - **`codeberg_release`**: Codeberg/Gitea repository (`locator: "owner/repo"`).
-   - **`chromium_snapshot`**: Downloads snapshot zip from Google storage buckets (`channel: "auto"` selects `Mac_Arm` or `Mac`).
-   - **`direct_url`**: Formats a download URL using `{version}` and `{arch}` tokens (e.g. `url_template: "https://example.com/v{version}/App-{arch}.dmg"`).
+   - **`github_release`**: GitHub repository (`locator = "owner/repo"`). Automatically scans recent releases for valid macOS containers (`.dmg`, `.zip`, `.tar.gz`, `.tar.xz`). Supports optional regex `asset_filter`.
+   - **`codeberg_release`**: Codeberg/Gitea repository (`locator = "owner/repo"`).
+   - **`chromium_snapshot`**: Downloads snapshot zip from Google storage buckets (`channel = "auto"` selects `Mac_Arm` or `Mac`).
+   - **`direct_url`**: Formats a download URL using `{version}` and `{arch}` tokens (e.g. `url_template = "https://example.com/v{version}/App-{arch}.dmg"`).
 10. **`livecheck`** *(Object, required)*:
    - **`github_latest_release`**: Queries GitHub API.
    - **`codeberg_latest_release`**: Queries Codeberg API.
@@ -150,43 +148,39 @@ Package recipes live in the `recipes/` directory as individual JSON files (`reci
 ### Step-by-Step: Adding a New Package
 
 1. **Create the Recipe File**:
-   Create `recipes/<app_id>.json`.
+   Create `recipes/<app_id>.toml`.
    
-   *Example: GitHub-hosted App (`recipes/vlc.json`)*:
-   ```json
-   {
-     "name": "VLC",
-     "aliases": ["vlc"],
-     "bundle_name": "VLC.app",
-     "homepage": "https://www.videolan.org/vlc/",
-     "quarantine_strip": true,
-     "source": {
-       "type": "github_release",
-       "locator": "videolan/vlc"
-     },
-     "livecheck": {
-       "strategy": "github_latest_release"
-     }
-   }
+   *Example: GitHub-hosted App (`recipes/vlc.toml`)*:
+   ```toml
+   name = "VLC"
+   aliases = ["vlc"]
+   bundle_name = "VLC.app"
+   homepage = "https://www.videolan.org/vlc/"
+   quarantine_strip = true
+
+   [source]
+   type = "github_release"
+   locator = "videolan/vlc"
+
+   [livecheck]
+   strategy = "github_latest_release"
    ```
 
-   *Example: Webpage Scraped App (`recipes/custom-app.json`)*:
-   ```json
-   {
-     "name": "CustomApp",
-     "aliases": ["capp"],
-     "bundle_name": "CustomApp.app",
-     "quarantine_strip": true,
-     "source": {
-       "type": "direct_url",
-       "url_template": "https://example.com/downloads/CustomApp-{version}.dmg"
-     },
-     "livecheck": {
-       "strategy": "regex_scrape",
-       "url": "https://example.com/downloads",
-       "regex": "CustomApp-([0-9.]+)\\.dmg"
-     }
-   }
+   *Example: Webpage Scraped App (`recipes/custom-app.toml`)*:
+   ```toml
+   name = "CustomApp"
+   aliases = ["capp"]
+   bundle_name = "CustomApp.app"
+   quarantine_strip = true
+
+   [source]
+   type = "direct_url"
+   url_template = "https://example.com/downloads/CustomApp-{version}.dmg"
+
+   [livecheck]
+   strategy = "regex_scrape"
+   url = "https://example.com/downloads"
+   regex = "CustomApp-([0-9.]+)\\.dmg"
    ```
 
 2. **Verify Detection**:
@@ -212,11 +206,11 @@ Package recipes live in the `recipes/` directory as individual JSON files (`reci
 
 ---
 
-## Architecture (Implemented V2 Modules)
+## Architecture (Implemented V0.2.0 Modules)
 
 ### 1. Recipe Loader — `src/recipe.rs`
 - Defines `Recipe`, `SourceConfig`, `LivecheckConfig`.
-- Loads and parses all JSON manifests under `recipes/`.
+- Loads and parses all TOML manifests under `recipes/`.
 - Supports `conflicting_applications` with serde aliases (`conflicts_with`, `conflicts`, `conflicting_apps`).
 - Resolves aliases case-insensitively.
 
@@ -275,7 +269,7 @@ Package recipes live in the `recipes/` directory as individual JSON files (`reci
   6. On failure: restores backup immediately (rollback).
 
 ### 7. Update Cache — `src/cache.rs`
-- Manages `local/cache.json`.
+- Manages `local/cache.toml`.
 - Records `name`, `local_version`, `remote_version`, `download_url`, `update_available`, `managed`, and `sha256`.
 - `pending_upgrades`: Strictly filters for `managed && update_available && !download_url.is_empty()`.
 - `was_managed`: Helper checking if an app was previously installed by `rpm`.
@@ -299,7 +293,7 @@ Package recipes live in the `recipes/` directory as individual JSON files (`reci
 - Implemented baseline `local.rs`, `network.rs`, `cache.rs`, `installer.rs`, and `cli.rs`.
 
 ### 2026-09-29
-- **V2 Architecture Overhaul (Homebrew Modernization)**:
+- **V0.2.0 Architecture Overhaul (Homebrew Modernization)**:
   - Replaced hardcoded catalog with declarative JSON recipes (`recipes/*.json`) and loader (`src/recipe.rs`).
   - Implemented semantic versioning and ordering (`src/version.rs`) replacing naive `!=` string matching.
   - Added single-pass SHA-256 verification to `src/network.rs`.
@@ -361,4 +355,18 @@ Package recipes live in the `recipes/` directory as individual JSON files (`reci
   - Planned dynamic dev mode resolution (`src/paths.rs`) enabling seamless dual operation between `cargo run` development and installed CLI execution.
   - Specified upstream recipe synchronization during `rpm update` and native in-place self-updating (`rpm self-update`).
   - Added new V0.3.0 scope to `GEMINI.md` per user approval.
+
+### 2026-10-01
+- **V0.2.0 Architecture Versioning Retrospective**:
+  - Relabeled all V2 architecture overhaul references in `GEMINI.md` to V0.2.0.
+- **TOML Recipe & State Cache Migration**:
+  - Migrated declarative recipe manifest format from JSON (`recipes/*.json`) to TOML (`recipes/*.toml`).
+  - Converted existing recipes: `recipes/qbittorrent.toml`, `recipes/librewolf.toml`, `recipes/chromium.toml`, and `recipes/chromium-snapshot.toml`.
+  - Migrated update cache from `local/cache.json` to `local/cache.toml`.
+  - Removed `serde_json` direct dependency from `Cargo.toml` in favor of `toml = "0.8"`.
+  - Updated `src/recipe.rs` to parse `.toml` files via `toml::from_str` and updated unit tests.
+  - Updated `src/cache.rs` to serialize and deserialize `local/cache.toml` via `toml::to_string_pretty` and `toml::from_str`.
+  - Bumped version to `0.2.1` in `Cargo.toml`.
+  - Switched `src/cli.rs` `print_help` to use `env!("CARGO_PKG_VERSION")`, baking the version into the binary at compile time.
+  - Verified all 20 tests pass and CLI commands (`list`, `list-all`, `update`, `help`) execute cleanly.
 

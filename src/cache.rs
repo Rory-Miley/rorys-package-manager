@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Project-local update index written by `update` / `install` and read by `upgrade` / installer.
-/// Path: `<repo>/local/cache.json` (relative to the process working directory for now).
-pub const CACHE_PATH: &str = "local/cache.json";
+/// Path: `<repo>/local/cache.toml` (relative to the process working directory for now).
+pub const CACHE_PATH: &str = "local/cache.toml";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedApp {
@@ -78,7 +78,7 @@ pub fn cache_file_path() -> PathBuf {
     PathBuf::from(CACHE_PATH)
 }
 
-/// Ensures `local/` exists, then writes the update cache as pretty JSON.
+/// Ensures `local/` exists, then writes the update cache as pretty TOML.
 pub fn save_cache(cache: &UpdateCache) -> Result<(), String> {
     let path = cache_file_path();
     if let Some(parent) = path.parent() {
@@ -86,14 +86,14 @@ pub fn save_cache(cache: &UpdateCache) -> Result<(), String> {
             .map_err(|e| format!("Failed to create cache directory {:?}: {}", parent, e))?;
     }
 
-    let json = serde_json::to_string_pretty(cache)
+    let toml_str = toml::to_string_pretty(cache)
         .map_err(|e| format!("Failed to serialise cache: {}", e))?;
 
-    fs::write(&path, json).map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+    fs::write(&path, toml_str).map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
     Ok(())
 }
 
-/// Loads `local/cache.json`. Returns an error if missing or invalid.
+/// Loads `local/cache.toml`. Returns an error if missing or invalid.
 pub fn load_cache() -> Result<UpdateCache, String> {
     load_cache_from(&cache_file_path())
 }
@@ -111,7 +111,7 @@ pub fn load_cache_from(path: &Path) -> Result<UpdateCache, String> {
     let raw = fs::read_to_string(path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
 
-    serde_json::from_str(&raw).map_err(|e| format!("Failed to parse {}: {}", path.display(), e))
+    toml::from_str(&raw).map_err(|e| format!("Failed to parse {}: {}", path.display(), e))
 }
 
 /// Apps that have an update, are managed by rpm, and have a download URL ready for the installer.
