@@ -412,30 +412,73 @@ fn cmd_install(
         }
     };
 
+    let mut switching_track = false;
+    let mut target_cask_token: Option<String> = None;
+
     let resolved_recipe = if let Some(r) = recipe::find_recipe(query, &recipes) {
-        Some(r.clone())
+        let track_mismatch = match track_override {
+            Some(req_track) => !r.matches_homebrew_track(req_track),
+            None => false,
+        };
+
+        if track_mismatch {
+            switching_track = true;
+            let token = r
+                .recipe_path
+                .as_ref()
+                .and_then(|p| p.file_stem().and_then(|s| s.to_str()))
+                .map(|s| s.to_string())
+                .or_else(|| r.aliases.first().cloned())
+                .unwrap_or_else(|| query.to_string());
+            target_cask_token = Some(token);
+
+            if verbose {
+                let track_name = match track_override {
+                    Some(config::HomebrewTrack::Upstream) => "upstream",
+                    Some(config::HomebrewTrack::Default) => "verified",
+                    _ => "default",
+                };
+                println!(
+                    "\x1b[1;34m==>\x1b[0m Switching Homebrew track for '{}' to '{}'...",
+                    r.name, track_name
+                );
+            }
+            None
+        } else {
+            Some(r.clone())
+        }
     } else {
-        if verbose {
+        None
+    };
+
+    let resolved_recipe = if let Some(r) = resolved_recipe {
+        Some(r)
+    } else {
+        if verbose && !switching_track {
             println!(
                 "\x1b[1;34m==>\x1b[0m '{}' not found locally. Searching upstream catalogs...",
                 query
             );
         }
 
-        // 1. Check native GitHub raw
-        let native_opt = match network::fetch_raw_github_recipe(query) {
-            Ok(opt) => opt,
-            Err(e) => {
-                if verbose {
-                    eprintln!("    \x1b[90m(Native upstream check: {})\x1b[0m", e);
+        // 1. Check native GitHub raw (skip if switching track for known Homebrew cask)
+        let native_opt = if !switching_track {
+            match network::fetch_raw_github_recipe(query) {
+                Ok(opt) => opt,
+                Err(e) => {
+                    if verbose {
+                        eprintln!("    \x1b[90m(Native upstream check: {})\x1b[0m", e);
+                    }
+                    None
                 }
-                None
             }
+        } else {
+            None
         };
 
         if let Some(raw_toml) = native_opt {
             match toml::from_str::<recipe::Recipe>(&raw_toml) {
-                Ok(rec) => {
+                Ok(mut rec) => {
                     let dest_dir = paths::recipes_dir().join("rpm");
                     let _ = std::fs::create_dir_all(&dest_dir);
                     let target_path = dest_dir.join(format!("{}.toml", query.to_lowercase()));
@@ -443,6 +486,7 @@ fn cmd_install(
                         eprintln!("\x1b[31mFailed to save recipe: {}\x1b[0m", e);
                         return 1;
                     }
+                    rec.recipe_path = Some(target_path);
                     if verbose {
                         println!("  \x1b[32m✓\x1b[0m Fetched native recipe: {}", rec.name);
                     }
@@ -455,9 +499,12 @@ fn cmd_install(
             }
         } else {
             // 2. Check Homebrew Cask API
-            match network::fetch_homebrew_cask_info(query) {
+            let lookup_token = target_cask_token.as_deref().unwrap_or(query);
+            match network::fetch_homebrew_cask_info(lookup_token) {
                 Ok(info) => {
-                    println!("\x1b[1;34m==>\x1b[0m Found '{}' in Homebrew Cask catalog.", info.name);
+                    if verbose || !switching_track {
+                        println!("\x1b[1;34m==>\x1b[0m Found '{}' in Homebrew Cask catalog.", info.name);
+                    }
 
                     // Pre-flight check: strict refusal if target exists and is unmanaged
                     let clean_bundle = if info.bundle_name.ends_with(".app") {
@@ -519,7 +566,10 @@ fn cmd_install(
                     }
 
                     match toml::from_str::<recipe::Recipe>(&toml_content) {
-                        Ok(rec) => Some(rec),
+                        Ok(mut rec) => {
+                            rec.recipe_path = Some(recipe_path);
+                            Some(rec)
+                        }
                         Err(e) => {
                             eprintln!("\x1b[31mFailed to parse generated recipe: {}\x1b[0m", e);
                             None

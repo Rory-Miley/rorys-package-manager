@@ -114,12 +114,15 @@ To eliminate catalog disk bloat, avoid slow bulk recipe synchronizations, and di
    - `rpm update` checks updates only for locally installed packages, hitting only their individual ~2 KB endpoints.
    - `cache.toml` tracks Homebrew-derived apps with identical fields (`managed`, `local_version`, `remote_version`, `download_url`, `sha256`).
 
-#### Future: Native Self-Update & Web Installer
-1. **Native Self-Update (`rpm self-update`)**:
+#### Future: Roadmap & To-Do List
+1. **Install Output Transparency & Verbosity Overhaul (`rpm install <app>`)**:
+   - Update `rpm install <app>` info to explicitly display whether the package is sourced from native `rpm` recipes or `homebrew` casks (including track: verified vs. upstream).
+   - Standardize default vs. verbose (`-v`) output for `rpm install`: keep default installation clean and informative while placing detailed payload URLs, staging paths, checksums, and extraction steps strictly behind `-v`.
+2. **Native Self-Update (`rpm self-update`)**:
    - Queries GitHub Releases for new `rpm` releases.
    - Downloads, verifies SHA-256, and atomically replaces the installed binary.
    - `rpm update` alerts the user with a pip/brew-style banner when a new version of `rpm` is available.
-2. **One-Liner Web Installer (`install.sh`)**:
+3. **One-Liner Web Installer (`install.sh`)**:
    - Installs via `curl -fsSL https://raw.githubusercontent.com/rorymiley/rorys-package-manager/master/install.sh | sh`.
    - Detects architecture (`arm64` vs `x86_64`), downloads release binary, sets up `~/.rpm/`, seeds initial catalog index, and configures `$PATH`.
 
@@ -459,9 +462,17 @@ regex = "(?P<version>[0-9]+(\\.[0-9]+)+)"
   - Updated raw GitHub upstream recipe URL in `src/network.rs` (`recipes/rpm/{}.toml`) and `cmd_install` in `src/cli.rs`.
   - Updated `scripts/install-local.sh` to seed `recipes/rpm/*.toml` to `~/.rpm/recipes/rpm/`.
   - Bumped version to `0.4.1` in `Cargo.toml` and git tagged `0.4.1`.
-- **Recipe Origin & Track Badges in `rpm list -v`**:
+- **Recipe Origin & Track Badges in `rpm list -v` (v0.4.2)**:
   - Modeled `RecipeOrigin` enum (`Rpm` vs `Homebrew { track }`) in `src/recipe.rs` with `display_label()` and `colored_badge()`.
   - Stored explicit `origin = "homebrew"` and `track = "verified"` / `track = "upstream"` in generated Cask manifests (`generate_cask_recipe_toml`).
   - Enhanced `rpm list -v` (`print_recipe_entry`) to display color-coded origin/track badges (`[recipe: rpm]`, `[recipe: homebrew (verified)]`, or `[recipe: homebrew (upstream)]`) alongside bundle details.
   - Added `-list` and `--list` aliases to CLI dispatch.
   - Expanded unit test suite to 34 tests (all passing).
+  - Bumped version to `0.4.2` in `Cargo.toml` and git tagged `0.4.2`.
+- **Homebrew Recipe Deletion on Uninstall & Track Switching in `install` (v0.4.3)**:
+  - Added `recipe::remove_cask_recipe`: automatically cleans up generated recipes from `recipes/homebrew/cask/<token>.toml` when an app is uninstalled via `rpm uninstall`, ensuring uninstalled Homebrew casks leave no stale manifests behind.
+  - Native curated recipes in `recipes/rpm/` are strictly preserved and never deleted on uninstall.
+  - Added `Recipe::matches_homebrew_track` and track-aware mismatch detection in `cmd_install`: when a user installs with an explicit `--upstream` or `--verified` flag and the cached recipe was generated on a different track, `rpm` skips the stale manifest, re-fetches the latest cask info from the Homebrew API, and regenerates the recipe for the requested track.
+  - Streamlined `rpm install` default console output: removed redundant `🔒 SHA-256 Verified` line when installing without `-v`.
+  - Added unit tests `test_remove_cask_recipe` and `test_matches_homebrew_track` bringing unit test suite to 36 tests (all passing).
+  - Bumped version to `0.4.3` in `Cargo.toml`.

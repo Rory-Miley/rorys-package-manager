@@ -419,6 +419,23 @@ pub fn uninstall_app(name: &str) -> Result<(), String> {
     cache.touch();
     cache::save_cache(&cache)?;
 
+    // If this was an auto-generated Homebrew cask recipe, remove the recipe file from disk
+    let matched_recipe = recipe::find_recipe(name, &recipes)
+        .or_else(|| recipe::find_recipe(canonical, &recipes));
+    if let Some(r) = matched_recipe {
+        recipe::remove_cask_recipe(r);
+    } else {
+        for candidate in [name, canonical] {
+            let candidate_path = paths::recipes_dir()
+                .join("homebrew")
+                .join("cask")
+                .join(format!("{}.toml", candidate.to_lowercase()));
+            if candidate_path.exists() {
+                let _ = fs::remove_file(&candidate_path);
+            }
+        }
+    }
+
     println!("  \x1b[32m✓\x1b[0m {} uninstalled.", canonical);
     Ok(())
 }
@@ -707,7 +724,6 @@ fn download_for_app(
                             println!("    🔒 SHA-256 Verified: \x1b[32m{}\x1b[0m", hash);
                         } else {
                             println!("    📦 Using cached payload");
-                            println!("    🔒 SHA-256 Verified");
                         }
                         return Ok((dest, hash));
                     } else {
@@ -725,8 +741,6 @@ fn download_for_app(
     let hash = network::download_file_with_hash(download_url, &dest, expected_sha256)?;
     if verbose {
         println!("    🔒 SHA-256 Verified: \x1b[32m{}\x1b[0m", hash);
-    } else {
-        println!("    🔒 SHA-256 Verified");
     }
     Ok((dest, hash))
 }

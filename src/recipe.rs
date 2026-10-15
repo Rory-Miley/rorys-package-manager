@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::config::HomebrewTrack;
 use crate::paths;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -187,6 +188,21 @@ impl Recipe {
             RecipeOrigin::Rpm
         }
     }
+
+    /// Checks if this recipe matches the requested Homebrew track.
+    /// Returns true for native recipes (track is ignored), or if the recipe's track matches `requested`.
+    pub fn matches_homebrew_track(&self, requested: HomebrewTrack) -> bool {
+        match (self.origin(), requested) {
+            (RecipeOrigin::Homebrew { track }, HomebrewTrack::Upstream) => {
+                track.eq_ignore_ascii_case("upstream")
+            }
+            (RecipeOrigin::Homebrew { track }, HomebrewTrack::Default) => {
+                track.eq_ignore_ascii_case("default") || track.eq_ignore_ascii_case("verified")
+            }
+            (RecipeOrigin::Homebrew { .. }, HomebrewTrack::Request) => true,
+            (RecipeOrigin::Rpm, _) => true,
+        }
+    }
 }
 
 /// Helper to recursively collect all .toml recipe files within a directory tree.
@@ -237,6 +253,30 @@ pub fn load_recipes_from_dir(dir: &Path) -> Result<Vec<Recipe>, String> {
 /// Resolves a recipe by name or alias from a list of recipes.
 pub fn find_recipe<'a>(query: &str, recipes: &'a [Recipe]) -> Option<&'a Recipe> {
     recipes.iter().find(|r| r.matches(query))
+}
+
+/// If the given recipe originated from Homebrew, removes its local recipe file from recipes/homebrew/cask/.
+/// Native recipes in recipes/rpm/ are never deleted. Returns true if a recipe file was removed.
+pub fn remove_cask_recipe(recipe: &Recipe) -> bool {
+    if matches!(recipe.origin(), RecipeOrigin::Homebrew { .. }) {
+        if let Some(ref path) = recipe.recipe_path {
+            if path.exists() && path.components().any(|c| c.as_os_str() == "homebrew") {
+                let _ = fs::remove_file(path);
+                return true;
+            }
+        }
+        for candidate in std::iter::once(&recipe.name).chain(recipe.aliases.iter()) {
+            let cask_path = paths::recipes_dir()
+                .join("homebrew")
+                .join("cask")
+                .join(format!("{}.toml", candidate.to_lowercase()));
+            if cask_path.exists() {
+                let _ = fs::remove_file(&cask_path);
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -436,6 +476,110 @@ mod tests {
             }
         );
         assert_eq!(r_hb_up.origin().display_label(), "homebrew (upstream)");
+    }
+
+    #[test]
+    fn test_remove_cask_recipe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hb_dir = tmp.path().join("homebrew").join("cask");
+        let rpm_dir = tmp.path().join("rpm");
+        fs::create_dir_all(&hb_dir).unwrap();
+        fs::create_dir_all(&rpm_dir).unwrap();
+
+        let hb_file = hb_dir.join("test-cask.toml");
+        fs::write(&hb_file, "name = \"test-cask\"\n").unwrap();
+
+        let rpm_file = rpm_dir.join("native-app.toml");
+        fs::write(&rpm_file, "name = \"native-app\"\n").unwrap();
+
+        let mut hb_recipe: Recipe = toml::from_str(r#"
+            name = "TestCask"
+            bundle_name = "TestCask.app"
+            origin = "homebrew"
+            track = "verified"
+            [source]
+            type = "homebrew_cask"
+            cask = "test-cask"
+            [livecheck]
+            strategy = "homebrew_cask"
+            cask = "test-cask"
+        "#).unwrap();
+        hb_recipe.recipe_path = Some(hb_file.clone());
+
+        let mut rpm_recipe: Recipe = toml::from_str(r#"
+            name = "NativeApp"
+            bundle_name = "NativeApp.app"
+            [source]
+            type = "direct_url"
+            url_template = "https://example.com/app.dmg"
+            [livecheck]
+            strategy = "raw_url"
+            url = "https://example.com/ver"
+        "#).unwrap();
+        rpm_recipe.recipe_path = Some(rpm_file.clone());
+
+        assert!(hb_file.exists());
+        assert!(rpm_file.exists());
+
+        // Native recipes should never be deleted
+        assert!(!remove_cask_recipe(&rpm_recipe));
+        assert!(rpm_file.exists());
+
+        // Homebrew recipes should be deleted
+        assert!(remove_cask_recipe(&hb_recipe));
+        assert!(!hb_file.exists());
+    }
+
+    #[test]
+    fn test_matches_homebrew_track() {
+        let hb_ver: Recipe = toml::from_str(r#"
+            name = "Test"
+            bundle_name = "Test.app"
+            origin = "homebrew"
+            track = "verified"
+            [source]
+            type = "homebrew_cask"
+            cask = "test"
+            [livecheck]
+            strategy = "homebrew_cask"
+            cask = "test"
+        "#).unwrap();
+
+        assert!(hb_ver.matches_homebrew_track(HomebrewTrack::Default));
+        assert!(!hb_ver.matches_homebrew_track(HomebrewTrack::Upstream));
+        assert!(hb_ver.matches_homebrew_track(HomebrewTrack::Request));
+
+        let hb_up: Recipe = toml::from_str(r#"
+            name = "Test"
+            bundle_name = "Test.app"
+            origin = "homebrew"
+            track = "upstream"
+            [source]
+            type = "github_release"
+            locator = "owner/repo"
+            [livecheck]
+            strategy = "github_latest_release"
+        "#).unwrap();
+
+        assert!(!hb_up.matches_homebrew_track(HomebrewTrack::Default));
+        assert!(hb_up.matches_homebrew_track(HomebrewTrack::Upstream));
+        assert!(hb_up.matches_homebrew_track(HomebrewTrack::Request));
+
+        let rpm_rec: Recipe = toml::from_str(r#"
+            name = "Native"
+            bundle_name = "Native.app"
+            [source]
+            type = "direct_url"
+            url_template = "https://example.com/app.dmg"
+            [livecheck]
+            strategy = "raw_url"
+            url = "https://example.com/ver"
+        "#).unwrap();
+
+        // Native recipes match any track (track is ignored)
+        assert!(rpm_rec.matches_homebrew_track(HomebrewTrack::Default));
+        assert!(rpm_rec.matches_homebrew_track(HomebrewTrack::Upstream));
+        assert!(rpm_rec.matches_homebrew_track(HomebrewTrack::Request));
     }
 }
 
