@@ -13,6 +13,20 @@ This file tracks planned features, enhancements, and roadmap items for `rpm`. Wo
     - Default mode: clean, minimal, informative progress without raw URLs, hex digests, or intermediate extraction details.
     - Verbose mode (`-v` / `--verbose`): display detailed payload URLs, staging paths, calculated SHA-256 digests, and archive extraction steps.
 
+- [ ] **Homebrew to RPM Migration Tool (`src/migrate.rs`)**
+  - **Command**: `rpm migrate [homebrew]`
+  - **Safety & Zero-Disruption Invariant**: Ultra-safe. Existing applications in `/Applications` are left completely intact and untouched (no re-downloading, no bundle swapping, zero risk of data loss).
+  - **Homebrew Cask Research & Disowning**:
+    - Investigate how Homebrew tracks casks (`/opt/homebrew/Caskroom/` on Apple Silicon, `/usr/local/Caskroom/` on Intel).
+    - Safely modify or remove Homebrew Caskroom records/receipts to release Homebrew's ownership *without* triggering Homebrew to delete the `/Applications` bundle.
+  - **Adoption & TOML Generation**:
+    - Inspect local bundle (`Info.plist`) to record current installed version and bundle ID.
+    - Query Homebrew Cask API to generate corresponding `recipes/homebrew/cask/<cask>.toml` manifests.
+    - Register migrated applications in `cache.toml` with `managed = true`.
+  - **Interactive Selection UI**:
+    - Discover and present an enumerated list of all currently Homebrew-managed casks and their installed versions.
+    - Provide interactive selection prompt allowing the user to select specific casks (e.g., `1, 3-5`), select all (`a` / `all`), or cancel.
+
 ---
 
 ## Medium Priority
