@@ -12,14 +12,34 @@ When developing this project, **goals and tasks should be focused on this file a
 
 ### Commit & Release Protocol
 When the user requests to **commit and push** (or wrap up a feature/release):
-1. **Check Current Version**: Read `Cargo.toml` to identify the active version (e.g. `0.4.3`).
-2. **Interactive Prompts**: Explicitly ask the user:
-   - If they want to increment the version number in `Cargo.toml` (state the current version and propose the next semver increment, e.g. `Current version is 0.4.3. Increment to 0.4.4?`).
-   - If they want to tag the release with that version (e.g. `git tag 0.4.4`).
-   - If they want to update `README.md` to align with the current status and feature set of the project.
+1. **Commit Intent Differentiation**:
+   - **Feature / Bugfix Commits**: Trigger the interactive release prompts below.
+   - **Documentation / Chore / Refactor Commits**: Default to staging, committing, and pushing directly to `master` without prompting for version bump or tag, unless explicitly requested.
+2. **Interactive Release Prompts**:
+   - Read `Cargo.toml` for the current version (e.g. `0.4.3`).
+   - Ask if the user wants to increment the version number in `Cargo.toml` (state the current version and propose next semver increment, e.g. `Current version is 0.4.3. Increment to 0.4.4?`).
+   - Ask if the user wants to tag the release with that version (e.g. `git tag 0.4.4`).
+   - Ask if the user wants to update `README.md` to align with the current status and feature set of the project.
 3. **Changelog Maintenance**: Ensure notable user-facing changes are documented under the corresponding version heading in [`CHANGELOG.md`](./CHANGELOG.md).
 4. **README Alignment**: If requested by the user, update `README.md` to reflect new commands, flags, or architecture.
 5. **Execute**: Stage changed files, commit, create the git tag if requested, and push to origin.
+
+### CLI Output Philosophy: Minimalist by Default
+Command output must be clean, human-friendly, and pip-like by default (e.g., progress bars, checkmarks, `• App [version]`). Never add raw download URLs, hex checksum digests, staging paths, or intermediate extraction details to the standard output. All diagnostic, transport, and debugging information belongs strictly behind the `-v` / `--verbose` flag.
+
+### Architecture & Bug Triage Protocol
+When diagnosing non-trivial bugs, performance issues, or evaluating design alternatives, explain the root cause and present viable approaches (with pros, cons, and a recommended solution) before touching code, unless the user explicitly commands immediate implementation.
+
+### Core Invariants & Mandatory Unit Testing
+Every code change affecting resolution, installation, or cache must preserve the four core project invariants:
+1. **Unmanaged Application Protection**: Refuse to overwrite or update bundles in `/Applications` not installed by `rpm`.
+2. **Cache Freshness**: Never reuse an older version payload from staging for an upstream install.
+3. **Quarantine Removal**: Strip `com.apple.quarantine` on unsigned packages after install/upgrade.
+4. **Atomic Swaps**: Safeguard running apps with atomic directory swaps, backups, and automatic rollback on failure.
+Any new installer, resolver, or recipe logic must include unit tests, and the full test suite (`cargo test`) must pass before concluding work.
+
+### Dev Environment Hygiene
+When testing local commands in dev mode, clean up any temporary scratch files or dummy test recipes created during verification, leaving `./local/staging/` and `./recipes/homebrew/` clean and predictable. **Important**: If an existing package recipe was already present in `recipes/homebrew/` prior to AI intervention, it must be preserved and not deleted.
 
 ### File Separation
 - **`README.md`**: Public user-facing project documentation, install instructions, CLI usage guide, and feature showcase.
