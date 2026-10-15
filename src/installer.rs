@@ -1165,6 +1165,9 @@ mod tests {
                 channel: "Mac_Arm".to_string(),
             },
             livecheck: LivecheckConfig::GithubLatestRelease,
+            origin: None,
+            track: None,
+            recipe_path: None,
         }
     }
 

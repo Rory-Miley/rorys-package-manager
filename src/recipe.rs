@@ -23,6 +23,44 @@ pub struct Recipe {
     pub conflicting_applications: Vec<String>,
     pub source: SourceConfig,
     pub livecheck: LivecheckConfig,
+    #[serde(default)]
+    pub origin: Option<String>,
+    #[serde(default)]
+    pub track: Option<String>,
+    #[serde(skip)]
+    pub recipe_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecipeOrigin {
+    Rpm,
+    Homebrew { track: String },
+}
+
+impl RecipeOrigin {
+    pub fn display_label(&self) -> String {
+        match self {
+            RecipeOrigin::Rpm => "rpm".to_string(),
+            RecipeOrigin::Homebrew { track } => {
+                if track.eq_ignore_ascii_case("default") || track.eq_ignore_ascii_case("verified") {
+                    "homebrew (verified)".to_string()
+                } else if track.eq_ignore_ascii_case("upstream") {
+                    "homebrew (upstream)".to_string()
+                } else {
+                    format!("homebrew ({})", track)
+                }
+            }
+        }
+    }
+
+    pub fn colored_badge(&self) -> String {
+        match self {
+            RecipeOrigin::Rpm => "[recipe: \x1b[34mrpm\x1b[0m]".to_string(),
+            RecipeOrigin::Homebrew { .. } => {
+                format!("[recipe: \x1b[35m{}\x1b[0m]", self.display_label())
+            }
+        }
+    }
 }
 
 fn default_quarantine_strip() -> bool {
@@ -97,6 +135,58 @@ impl Recipe {
     pub fn app_path(&self) -> PathBuf {
         PathBuf::from("/Applications").join(&self.bundle_name)
     }
+
+    /// Determines the origin and download track of this recipe (rpm native vs homebrew cask).
+    pub fn origin(&self) -> RecipeOrigin {
+        // 1. Check explicit origin / track in recipe manifest
+        if let Some(ref orig) = self.origin {
+            if orig.eq_ignore_ascii_case("homebrew") {
+                let trk = self.track.clone().unwrap_or_else(|| {
+                    if matches!(self.source, SourceConfig::HomebrewCask { .. }) {
+                        "verified".to_string()
+                    } else {
+                        "upstream".to_string()
+                    }
+                });
+                return RecipeOrigin::Homebrew { track: trk };
+            } else if orig.eq_ignore_ascii_case("rpm") {
+                return RecipeOrigin::Rpm;
+            }
+        }
+
+        // 2. Check recipe file path if available
+        if let Some(ref path) = self.recipe_path {
+            if path.components().any(|c| c.as_os_str() == "homebrew") {
+                let trk = self.track.clone().unwrap_or_else(|| {
+                    if matches!(self.source, SourceConfig::HomebrewCask { .. }) {
+                        "verified".to_string()
+                    } else {
+                        "upstream".to_string()
+                    }
+                });
+                return RecipeOrigin::Homebrew { track: trk };
+            }
+            if path.components().any(|c| c.as_os_str() == "rpm") {
+                return RecipeOrigin::Rpm;
+            }
+        }
+
+        // 3. Fallback to source / livecheck inspection
+        if matches!(self.source, SourceConfig::HomebrewCask { .. })
+            || matches!(self.livecheck, LivecheckConfig::HomebrewCask { .. })
+        {
+            let trk = self.track.clone().unwrap_or_else(|| {
+                if matches!(self.source, SourceConfig::HomebrewCask { .. }) {
+                    "verified".to_string()
+                } else {
+                    "upstream".to_string()
+                }
+            });
+            RecipeOrigin::Homebrew { track: trk }
+        } else {
+            RecipeOrigin::Rpm
+        }
+    }
 }
 
 /// Helper to recursively collect all .toml recipe files within a directory tree.
@@ -132,8 +222,9 @@ pub fn load_recipes_from_dir(dir: &Path) -> Result<Vec<Recipe>, String> {
     for path in toml_files {
         let content = fs::read_to_string(&path)
             .map_err(|e| format!("Failed to read recipe file {}: {}", path.display(), e))?;
-        let recipe: Recipe = toml::from_str(&content)
+        let mut recipe: Recipe = toml::from_str(&content)
             .map_err(|e| format!("Failed to parse recipe {}: {}", path.display(), e))?;
+        recipe.recipe_path = Some(path.clone());
         recipes.push(recipe);
     }
 
@@ -281,6 +372,70 @@ mod tests {
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].name, "App One");
         assert_eq!(loaded[1].name, "App Two");
+        assert_eq!(loaded[0].origin(), RecipeOrigin::Rpm);
+        assert_eq!(
+            loaded[1].origin(),
+            RecipeOrigin::Homebrew {
+                track: "verified".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_recipe_origin_detection() {
+        let rpm_toml = r#"
+            name = "NativeApp"
+            bundle_name = "NativeApp.app"
+            [source]
+            type = "direct_url"
+            url_template = "https://example.com/native.dmg"
+            [livecheck]
+            strategy = "raw_url"
+            url = "https://example.com/ver"
+        "#;
+        let r_rpm: Recipe = toml::from_str(rpm_toml).unwrap();
+        assert_eq!(r_rpm.origin(), RecipeOrigin::Rpm);
+
+        let hb_ver_toml = r#"
+            name = "CaskApp"
+            bundle_name = "CaskApp.app"
+            origin = "homebrew"
+            track = "verified"
+            [source]
+            type = "homebrew_cask"
+            cask = "cask-app"
+            [livecheck]
+            strategy = "homebrew_cask"
+            cask = "cask-app"
+        "#;
+        let r_hb_ver: Recipe = toml::from_str(hb_ver_toml).unwrap();
+        assert_eq!(
+            r_hb_ver.origin(),
+            RecipeOrigin::Homebrew {
+                track: "verified".to_string()
+            }
+        );
+        assert_eq!(r_hb_ver.origin().display_label(), "homebrew (verified)");
+
+        let hb_up_toml = r#"
+            name = "UpstreamCask"
+            bundle_name = "UpstreamCask.app"
+            origin = "homebrew"
+            track = "upstream"
+            [source]
+            type = "github_release"
+            locator = "owner/repo"
+            [livecheck]
+            strategy = "github_latest_release"
+        "#;
+        let r_hb_up: Recipe = toml::from_str(hb_up_toml).unwrap();
+        assert_eq!(
+            r_hb_up.origin(),
+            RecipeOrigin::Homebrew {
+                track: "upstream".to_string()
+            }
+        );
+        assert_eq!(r_hb_up.origin().display_label(), "homebrew (upstream)");
     }
 }
 

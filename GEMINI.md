@@ -245,8 +245,9 @@ regex = "(?P<version>[0-9]+(\\.[0-9]+)+)"
 ## Architecture (Implemented V0.2.0 Modules)
 
 ### 1. Recipe Loader — `src/recipe.rs`
-- Defines `Recipe`, `SourceConfig`, `LivecheckConfig`.
-- Loads and parses all TOML manifests under `recipes/`.
+- Defines `Recipe`, `SourceConfig`, `LivecheckConfig`, and `RecipeOrigin` (`Rpm` vs `Homebrew { track: String }`).
+- Loads and parses all TOML manifests under `recipes/` recursively across `recipes/rpm/` and `recipes/homebrew/cask/`.
+- Determines recipe origin and download track (`origin()`) via explicit manifest metadata, file paths, and source/livecheck types.
 - Supports `conflicting_applications` with serde aliases (`conflicts_with`, `conflicts`, `conflicting_apps`).
 - Resolves aliases case-insensitively.
 
@@ -316,9 +317,8 @@ regex = "(?P<version>[0-9]+(\\.[0-9]+)+)"
 
 ### 8. CLI Dispatch — `src/cli.rs` + thin `src/main.rs`
 - Commands: `update`, `upgrade`, `install`, `uninstall`, `cleanup` (alias `clean`), `list`, `list-all`, `help`.
-- Standardized bracketed version formatting `[<version>]` across all commands.
-- `list` only lists installed packages; `list-all` lists the complete recipe catalog.
-- Supports `-v` / `--verbose` / `-verbose` across `update`, `install`, `upgrade`, `cleanup`, `list`, and `list-all` for detailed inspection (suppressing payload URLs, full SHA-256 digests, status tags, and intermediate extraction steps in default mode).
+- `list [-v]` only lists installed packages; verbose mode displays full bundle details, managed status, and recipe origin/track badges (`[recipe: rpm]`, `[recipe: homebrew (verified)]`, or `[recipe: homebrew (upstream)]`). Supports `-list` and `--list` aliases.
+- Supports `-v` / `--verbose` / `-verbose` across `update`, `install`, `upgrade`, `cleanup`, and `list` for detailed inspection (suppressing payload URLs, full SHA-256 digests, status tags, and intermediate extraction steps in default mode).
 - Clean install flag (`-c` / `--clean`): purges existing cached payloads in staging and forces fresh download and installation even if currently up to date.
 - Pre-flight conflict rejection in `cmd_install` aborting incompatible installations before network operations.
 - Rejection of installs targeting unmanaged existing applications, presenting clear migration steps.
@@ -458,3 +458,10 @@ regex = "(?P<version>[0-9]+(\\.[0-9]+)+)"
   - Moved native curated recipes and alias symlinks into `recipes/rpm/` to strictly separate them from machine-local imported Homebrew casks (`recipes/homebrew/cask/`), preventing updates or syncs from overwriting user-imported casks.
   - Updated raw GitHub upstream recipe URL in `src/network.rs` (`recipes/rpm/{}.toml`) and `cmd_install` in `src/cli.rs`.
   - Updated `scripts/install-local.sh` to seed `recipes/rpm/*.toml` to `~/.rpm/recipes/rpm/`.
+  - Bumped version to `0.4.1` in `Cargo.toml` and git tagged `0.4.1`.
+- **Recipe Origin & Track Badges in `rpm list -v`**:
+  - Modeled `RecipeOrigin` enum (`Rpm` vs `Homebrew { track }`) in `src/recipe.rs` with `display_label()` and `colored_badge()`.
+  - Stored explicit `origin = "homebrew"` and `track = "verified"` / `track = "upstream"` in generated Cask manifests (`generate_cask_recipe_toml`).
+  - Enhanced `rpm list -v` (`print_recipe_entry`) to display color-coded origin/track badges (`[recipe: rpm]`, `[recipe: homebrew (verified)]`, or `[recipe: homebrew (upstream)]`) alongside bundle details.
+  - Added `-list` and `--list` aliases to CLI dispatch.
+  - Expanded unit test suite to 34 tests (all passing).

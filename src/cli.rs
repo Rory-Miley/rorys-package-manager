@@ -73,7 +73,7 @@ pub fn run(args: &[String]) -> i32 {
         "homebrew" => {
             cmd_homebrew(args)
         },
-        "list" => {
+        "list" | "-list" | "--list" => {
             let is_verbose = args
                 .iter()
                 .any(|arg| arg == "-v" || arg == "--verbose" || arg == "-verbose");
@@ -174,8 +174,10 @@ fn print_recipe_entry(r: &recipe::Recipe, local_ver: &str, managed: bool) {
         " [unmanaged]"
     };
 
+    let origin_str = format!(" {}", r.origin().colored_badge());
+
     println!(
-        "  • \x1b[1m{}\x1b[0m {}{} — \x1b[36m{}\x1b[0m (Status: {}{})",
+        "  • \x1b[1m{}\x1b[0m {}{} — \x1b[36m{}\x1b[0m (Status: {}{}){}",
         r.name,
         ver_badge,
         aliases_str,
@@ -185,7 +187,8 @@ fn print_recipe_entry(r: &recipe::Recipe, local_ver: &str, managed: bool) {
         } else {
             "\x1b[32mInstalled\x1b[0m"
         },
-        status_suffix
+        status_suffix,
+        origin_str
     );
     if let Some(desc) = &r.description {
         println!("    \x1b[90m{}\x1b[0m", desc);
@@ -350,7 +353,7 @@ fn generate_cask_recipe_toml(
     match track {
         config::HomebrewTrack::Default | config::HomebrewTrack::Request => {
             format!(
-                "name = \"{}\"\naliases = [\"{}\"]\nbundle_name = \"{}\"\n{}{}quarantine_strip = true\n{}\n[source]\ntype = \"homebrew_cask\"\ncask = \"{}\"\n\n[livecheck]\nstrategy = \"homebrew_cask\"\ncask = \"{}\"\n",
+                "name = \"{}\"\naliases = [\"{}\"]\nbundle_name = \"{}\"\norigin = \"homebrew\"\ntrack = \"verified\"\n{}{}quarantine_strip = true\n{}\n[source]\ntype = \"homebrew_cask\"\ncask = \"{}\"\n\n[livecheck]\nstrategy = \"homebrew_cask\"\ncask = \"{}\"\n",
                 info.name.replace('"', "\\\""),
                 info.token,
                 info.bundle_name,
@@ -367,7 +370,7 @@ fn generate_cask_recipe_toml(
                 let owner = &caps[1];
                 let repo = &caps[2];
                 format!(
-                    "name = \"{}\"\naliases = [\"{}\"]\nbundle_name = \"{}\"\n{}{}quarantine_strip = true\n{}\n[source]\ntype = \"github_release\"\nlocator = \"{}/{}\"\n\n[livecheck]\nstrategy = \"github_latest_release\"\n",
+                    "name = \"{}\"\naliases = [\"{}\"]\nbundle_name = \"{}\"\norigin = \"homebrew\"\ntrack = \"upstream\"\n{}{}quarantine_strip = true\n{}\n[source]\ntype = \"github_release\"\nlocator = \"{}/{}\"\n\n[livecheck]\nstrategy = \"github_latest_release\"\n",
                     info.name.replace('"', "\\\""),
                     info.token,
                     info.bundle_name,
@@ -379,7 +382,7 @@ fn generate_cask_recipe_toml(
                 )
             } else {
                 format!(
-                    "name = \"{}\"\naliases = [\"{}\"]\nbundle_name = \"{}\"\n{}{}quarantine_strip = true\n{}\n[source]\ntype = \"direct_url\"\nurl_template = \"{}\"\n\n[livecheck]\nstrategy = \"homebrew_cask\"\ncask = \"{}\"\n",
+                    "name = \"{}\"\naliases = [\"{}\"]\nbundle_name = \"{}\"\norigin = \"homebrew\"\ntrack = \"upstream\"\n{}{}quarantine_strip = true\n{}\n[source]\ntype = \"direct_url\"\nurl_template = \"{}\"\n\n[livecheck]\nstrategy = \"homebrew_cask\"\ncask = \"{}\"\n",
                     info.name.replace('"', "\\\""),
                     info.token,
                     info.bundle_name,
