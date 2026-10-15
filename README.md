@@ -1,108 +1,165 @@
-# Rory's Package Manager (`rpm`) MacOS
+# Rory's Package Manager (`rpm`) for macOS
 
-NOT TO BE CONFUSED WITH "red hat package manager (rpm) for linux", it is annoying and unfortunate that they have the same name as me, but I don't use Fedora (Arch obviously) and this package manager is for MacOS. I will consider changing the name... never.
+NOT TO BE CONFUSED WITH "red hat package manager (rpm) for linux", it is annoying and unfortunate that they have the same name as me, but I don't use Fedora (Arch obviously) and this package manager is for macOS. I will consider changing the name... never.
 
-A fast, lightweight, and safe macOS package manager written in Rust, designed for managing, updating, and installing unsigned and custom macOS software. In addition, it removes the apple "quarantine" attribute from the package.
+A fast, lightweight, and safe macOS CLI package manager written in Rust, designed for managing, updating, and installing unsigned and custom macOS software. In addition, it strips Apple's "quarantine" attribute and automatically registers applications with Spotlight and Launchpad.
+
+This package manager utlises custom recipes for apps that are not maintained by homebrew as well as hooking into the existing api from homebrew to allow the install of any casks from their repo. To do this the .json files are converted to .toml on the fly and stored locally on your device.
+
+Currently, only casks are supported from homebrew. Non GUI apps will be supported at a later date.
 
 ---
 
 ## Compatibility
 
-Honestly, no idea, but I can tell you what I have tested it on:
-
-Macbook M3 Pro
-- MacOS version: 26.6.1
-- MacOS version: 26.6.2
+Tested and verified on:
+- Apple Silicon (MacBook M3 Pro): macOS 15+ / 26.x
+- Supported architectures: `arm64` (Apple Silicon) & `x86_64` (Intel)
 
 ---
 
 ## Key Features
 
-- **Declarative TOML Recipes (`recipes/*.toml`)**: Packages are defined in simple TOML files with zero recompilation needed to add or modify apps.
-- **Smart Alias Resolution**: Install or manage apps using intuitive shortcuts (e.g. `qbt` for `qBittorrent`, `chrome` for `Chromium`).
-- **Cryptographic SHA-256 Verification**: Streams incoming archives through a SHA-256 hasher during download to ensure file integrity.
+- **Index-Free On-Demand Resolution**: No multi-gigabyte local catalogs or slow bulk clones. `rpm install <app>` resolves on demand: local recipes $\to$ GitHub raw manifests $\to$ Homebrew Cask API.
+- **Dual-Track Homebrew Cask Importer**: Install any Homebrew cask via either:
+  - **Verified Track** (`--verified`): Tested download URL and Homebrew-verified SHA-256 digest.
+  - **Upstream Track** (`--upstream`): Direct developer upstream release with dynamic single-pass checksumming for zero-day updates.
+- **Declarative TOML Recipes (`recipes/rpm/*.toml`)**: Native packages are defined in simple TOML manifests with zero Rust recompilation required to add or modify apps.
+- **Smart Alias Resolution**: Install and manage apps using intuitive shortcuts (e.g. `qbt` $\to$ `qBittorrent`, `chrome` $\to$ `Chromium`, `vlc` $\to$ `VLC media player`).
+- **Cryptographic Single-Pass Verification**: Streams incoming payloads directly through a SHA-256 hasher during download with atomic `.part` promotion.
 - **Running App Protection & Atomic Swaps**: Detects running applications before upgrading, requests graceful quit, and uses an atomic directory swap with automatic rollback to protect active apps from crashes or partial overwrite corruption.
-- **Pluggable Version Detection (`Livecheck`)**: Supports GitHub releases, Codeberg, Chromium Dash, raw URL manifests, and regex webpage scrapers.
-- **Multi-Container Support**: Handles `.dmg` (with automatic software license agreement acceptance), `.zip`, `.tar.gz`, and `.tar.xz` archives.
+- **Instant System Registration**: Force-registers newly installed apps with Launch Services (`lsregister -f`), Spotlight (`mdimport`), and refreshes directory timestamps (`touch`) so apps appear immediately in Spotlight and Launchpad without opening Finder.
 - **Gatekeeper Quarantine Stripping**: Automatically strips Apple's `com.apple.quarantine` extended attribute on unsigned apps, with a per-package `quarantine_strip` toggle.
-- **Package Conflict & Compatibility Protection**: Prevents installing incompatible or mutually exclusive applications (e.g. stable `Chromium` vs bleeding-edge `Chromium Snapshot`) via `conflicting_applications` recipe tags.
-- **Unmanaged Application Protection (Homebrew-Inspired)**: Refuses to overwrite or automatically update existing applications in `/Applications` that were not installed through `rpm`. Protects external or manual installs from unintended modification and provides clear migration instructions.
+- **Package Conflict & Compatibility Protection**: Prevents installing incompatible or mutually exclusive applications (e.g. stable `Chromium` vs bleeding-edge `Chromium Snapshot`) via bidirectional `conflicting_applications` recipe rules.
+- **Unmanaged Application Protection (Homebrew-Inspired)**: Refuses to overwrite or automatically update existing applications in `/Applications` that were not installed through `rpm`.
+- **Pip-Style Dynamic Progress Bar**: Real-time terminal progress bar featuring download speed (EMA smoothed), downloaded/total MB counter, and remaining ETA that dynamically scales with terminal width.
+- **Dual-Mode Engine**: Operates seamlessly as an installed system binary (`/opt/rpm/bin/rpm`) or in local repository development mode (`cargo run --`).
 
 ---
 
-## Usage
+## Installation & Setup
 
-### 1. Check for Updates
-Scan currently installed applications, query upstreams, compare versions, and refresh `local/cache.toml`:
+### System Installation
+Build and install `rpm` directly onto your machine:
 ```sh
-cargo run -- update
+./scripts/install-local.sh
 ```
-Pass `-v` (or `--verbose`) for detailed diagnostic output, including architecture detection, payload URLs, and expected SHA-256 digests:
-```sh
-cargo run -- update -v
-```
-*(Only checks packages currently installed on your machine. Unmanaged applications installed outside `rpm` are skipped from automatic update queues).*
+This script:
+1. Compiles the optimized release binary (`cargo build --release`).
+2. Installs the executable to `/opt/rpm/bin/rpm`.
+3. Adds `/opt/rpm/bin` to your system `$PATH` via `/etc/paths.d/rpm`.
+4. Seeds persistent recipes to `~/.rpm/recipes/rpm/`.
 
-### 2. Upgrade Pending Applications
-Download, verify SHA-256, and install pending updates from the cache (only manages `rpm`-tracked apps):
+Once installed, restart your terminal and run `rpm` directly:
 ```sh
-cargo run -- upgrade
-```
-
-### 3. Install an Application
-Install or reinstall an app by its canonical name or alias:
-```sh
-cargo run -- install qbt
-cargo run -- install chromium
-cargo run -- install librewolf
-```
-Pass `-c` (or `--clean`) to perform a **clean install** (bypasses/purges any cached payload in `local/staging/` to force a fresh download):
-```sh
-cargo run -- install -c qbt
-```
-> **Security Note:** If an application is already present under `/Applications` but was **not installed by `rpm`** (unmanaged), `rpm` refuses to overwrite it to preserve system integrity. To manage it with `rpm`, uninstall or remove the existing `.app` bundle first, then run `install`.
-
-### 4. List Installed Applications
-View currently installed packages and their versions:
-```sh
-cargo run -- list
-```
-Pass `-v` or `-verbose` to view detailed verbose information (aliases, bundle name, management status badge, and description):
-```sh
-cargo run -- list -v
+rpm update
+rpm install vlc
 ```
 
-### 5. List All Available Packages
-View all available recipes in the catalog that you can install:
+### Uninstallation
+To cleanly remove `rpm` from your system:
 ```sh
-cargo run -- list-all
-```
-Pass `-v` or `-verbose` for detailed package information:
-```sh
-cargo run -- list-all -v
+./scripts/uninstall-local.sh
 ```
 
-### 6. Uninstall an Application
-Safely remove a managed application from `/Applications` and update cache:
+### Local Development Mode
+You can also run commands directly from source inside this repository:
 ```sh
-cargo run -- uninstall qbt
+cargo run -- <command>
+```
+
+---
+
+## CLI Usage Guide
+
+### 1. Check for Updates (`update`)
+Scan currently installed applications, check upstreams for new releases, compare versions, and refresh cache:
+```sh
+rpm update
+```
+Pass `-v` (or `--verbose`) for detailed diagnostic output including system architecture, payload URLs, and expected SHA-256 hashes:
+```sh
+rpm update -v
+```
+*(Only checks packages currently installed on your machine. Unmanaged applications installed outside `rpm` are skipped from update queues).*
+
+### 2. Upgrade Applications (`upgrade`)
+Download, verify SHA-256, and install pending updates for managed applications:
+```sh
+rpm upgrade
+```
+Pass `-c` (or `--clean`) to bypass cached payloads in staging and force fresh downloads:
+```sh
+rpm upgrade -c
+```
+
+### 3. Install Applications (`install`)
+Install an application by its canonical name, alias, or Homebrew cask token:
+```sh
+rpm install qbt
+rpm install chromium
+rpm install librewolf
+rpm install vlc
+```
+
+#### Track Selection for Homebrew Casks:
+- **Verified Track** (tested Homebrew release with verified checksum):
+  ```sh
+  rpm install vlc --verified
+  ```
+- **Upstream Track** (direct developer release from GitHub/upstream):
+  ```sh
+  rpm install vlc --upstream
+  ```
+- **Clean Install** (bypass/purge cached staging payload):
+  ```sh
+  rpm install -c vlc
+  ```
+
+> **Security Guard:** If an application is already installed in `/Applications` but was **not installed by `rpm`** (unmanaged), `rpm` refuses to overwrite it to preserve user data and system integrity. To manage it with `rpm`, remove the existing `.app` bundle first, then run `rpm install <app>`.
+
+### 4. List Installed Packages (`list`)
+View locally installed packages and their versions:
+```sh
+rpm list
+```
+Pass `-v` or `--verbose` for detailed inspection, including bundle paths, descriptions, and origin badges (`[recipe: rpm]`, `[recipe: homebrew (verified)]`, `[recipe: homebrew (upstream)]`):
+```sh
+rpm list -v
+```
+
+### 5. Configure Homebrew Track Preferences (`homebrew`)
+View the current default track preference for Homebrew casks:
+```sh
+rpm homebrew
+```
+Set the global track preference:
+```sh
+rpm homebrew -default     # Always use Homebrew verified track
+rpm homebrew -upstream    # Always use developer upstream track
+rpm homebrew -request     # Prompt interactively on each new cask install
+```
+
+### 6. Uninstall Applications (`uninstall`)
+Safely remove a managed application from `/Applications`, unregister it from Launch Services, clean up auto-generated Homebrew recipe manifests, and update cache:
+```sh
+rpm uninstall vlc
 ```
 
 ### 7. Clean Cached Downloads (`cleanup`)
-Remove cached download archives from staging to free disk space or prepare for fresh downloads:
+Remove cached download archives from staging to free disk space (alias: `rpm clean`):
 ```sh
-cargo run -- cleanup            # Cleans all cached downloads from local/staging
-cargo run -- cleanup librewolf  # Cleans cached downloads for a specific package
+rpm cleanup            # Clean all cached payloads
+rpm cleanup librewolf  # Clean cached payloads for a specific package
 ```
 
 ---
 
-## Adding New Packages (TOML Recipes)
+## Adding Native Packages (TOML Recipes)
 
-To add a new application, drop a TOML recipe file into the `recipes/` directory.
+To add a new curated application, add a TOML file under `recipes/rpm/<app_name>.toml`. Adding a package requires **zero Rust recompilation**.
 
-### Example: GitHub-Hosted App (`recipes/qbittorrent.toml`)
-
+### Example: GitHub Release App (`recipes/rpm/qbittorrent.toml`)
 ```toml
 name = "qBittorrent"
 aliases = ["qbittorrent", "qbt"]
@@ -119,8 +176,7 @@ locator = "qbittorrent/qBittorrent"
 strategy = "github_latest_release"
 ```
 
-### Example: Conflicting Packages (`recipes/chromium.toml` & `recipes/chromium-snapshot.toml`)
-
+### Example: Conflicting Packages (`recipes/rpm/chromium.toml` & `recipes/rpm/chromium-snapshot.toml`)
 ```toml
 name = "Chromium"
 aliases = ["chromium", "chrome"]
@@ -138,50 +194,23 @@ locator = "ungoogled-software/ungoogled-chromium-macos"
 strategy = "github_latest_release"
 ```
 
-```toml
-name = "Chromium Snapshot"
-aliases = ["chromium-snapshot", "chrome-snapshot", "snapshot-chromium"]
-bundle_name = "Chromium Snapshot.app"
-homepage = "https://www.chromium.org"
-description = "Continuous bleeding-edge snapshot build of Chromium"
-quarantine_strip = true
-conflicting_applications = ["Chromium"]
-
-[source]
-type = "chromium_snapshot"
-channel = "auto"
-
-[livecheck]
-strategy = "raw_url"
-url = "https://commondatastorage.googleapis.com/chromium-browser-snapshots/Mac_Arm/LAST_CHANGE"
-```
-
-For full recipe documentation and advanced options (such as regex web scrapers and custom asset filters), see [GEMINI.md](GEMINI.md).
+For the complete recipe schema and livecheck options, see [GEMINI.md](GEMINI.md).
 
 ---
 
-## Architecture Overview
+## Roadmap & Releases
 
-- **`src/recipe.rs`**: TOML recipe parsing, schema validation, `conflicting_applications` parsing, and alias matching.
-- **`src/version.rs`**: Semantic version parsing and ordering (`Ord`, `PartialEq`).
-- **`src/network.rs`**: Streaming SHA-256 download client and pluggable Livecheck strategies.
-- **`src/progress.rs`**: Pip-style dynamic terminal progress bar with orange fill, grey shaded track, speed, and ETA calculations.
-- **`src/local.rs`**: `Info.plist` version inspection, `pgrep` process checking, and quarantine removal.
-- **`src/installer.rs`**: Container extraction (.dmg, .zip, .tar), bundle validation, atomic directory swap, unmanaged bundle guards, and conflict prevention.
-- **`src/cache.rs`**: Local state tracking (`local/cache.toml`) and `pending_upgrades` filtering for managed apps.
-- **`src/cli.rs`**: CLI command dispatch, unmanaged app protection warnings, conflict checking, and pip-style formatted output.
+- **Feature Backlog & Roadmap**: See [TO_DO.md](TO_DO.md) for prioritized upcoming features.
+- **Release History**: See [CHANGELOG.md](CHANGELOG.md) for detailed notes on all versions.
 
 ---
 
-## To Do
+## Credits & Inspirations
 
-- [x] ~~**Fixed**: LibreWolf recipe & network.rs macOS binary resolution~~ (Resolved: strict non-macOS binary filtering and preference for `.dmg` > `.zip` > `.tar.*`).
+- **[Homebrew](https://brew.sh)**: For inspiring the unmanaged application protection pattern, recipe decoupling, and providing the public Homebrew Cask API.
+- **[pip](https://pypa.github.io/pip/)**: For inspiring the clean, user-friendly CLI design and dynamic download progress bar UI.
 
-- [x] ~~**Completed**: Improve download UI~~ (Resolved: Pip-style dynamic progress bar with classic orange blocks, grey shaded background, left-aligned percentage, downloaded/total MB counter, download speed, and ETA scaling seamlessly with the terminal window).
-
-- **'Further down the line'** I would like the final stages for distribution to be done. I.E. I shouldn't ahve to run "$ cargo run -- [commadn]". I want an installer script to install the rpm application so that i can use "$ rpm -- [command]" instead. Additionally, a selfupdater is required for this implimentation also. For this we will need to decide on local config directory to store the cache files and i guess the receipe json files also. I would recommend checking the homebrew package manager to see what best practice is in that regard.
-
-- Ensure that we are crediting Homebrew in our repo in the correct file maybe a lisence.md file or something that shows we coppied a lot of the style from Homebrew and i guess credit pip because we plan on using their download bar. 
+---
 
 ## License
 
