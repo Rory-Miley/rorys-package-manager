@@ -1,15 +1,35 @@
 # AI.md — session context for Rory's Package Manager
 
-This is the AI.md file for tracking context across sessions and different AI models. It can be updated by any AI model in use, but **only after asking the user first**.
+This is the context and instructions file for Rory's Package Manager (`rpm`). It can be updated by any AI model in use, but **only after asking the user first**.
 
-When developing this project, **goals and tasks should be focused on this file** to keep work in scope. If work starts drifting off scope, remind the user and either:
-
-- steer back to what's listed here, or
-- offer to **add new scope to this file** (with user approval) before implementing it.
+When developing this project, **goals and tasks should be focused on this file and `TO_DO.md`** to keep work in scope. If work starts drifting off scope, remind the user and either:
+- steer back to what's listed here or in `TO_DO.md`, or
+- offer to **add new scope to `TO_DO.md` or this file** (with user approval) before implementing it.
 
 ---
 
-## Project goal
+## AI & Developer Workflow Rules
+
+### Commit & Release Protocol
+When the user requests to **commit and push** (or wrap up a feature/release):
+1. **Check Current Version**: Read `Cargo.toml` to identify the active version (e.g. `0.4.3`).
+2. **Interactive Prompts**: Explicitly ask the user:
+   - If they want to increment the version number in `Cargo.toml` (state the current version and propose the next semver increment, e.g. `Current version is 0.4.3. Increment to 0.4.4?`).
+   - If they want to tag the release with that version (e.g. `git tag 0.4.4`).
+   - If they want to update `README.md` to align with the current status and feature set of the project.
+3. **Changelog Maintenance**: Ensure notable user-facing changes are documented under the corresponding version heading in [`CHANGELOG.md`](./CHANGELOG.md).
+4. **README Alignment**: If requested by the user, update `README.md` to reflect new commands, flags, or architecture.
+5. **Execute**: Stage changed files, commit, create the git tag if requested, and push to origin.
+
+### File Separation
+- **`README.md`**: Public user-facing project documentation, install instructions, CLI usage guide, and feature showcase.
+- **`GEMINI.md`** (this file): Architectural context, invariant design principles, decided product rules, recipe schema, and assistant protocols.
+- **`TO_DO.md`**: Feature backlog, prioritized to-dos, and future roadmap items.
+- **`CHANGELOG.md`**: Full historical release notes following the [Keep a Changelog](https://keepachangelog.com/) standard.
+
+---
+
+## Project Goal
 
 A macOS CLI package manager (`rpm`) for **unsigned** and custom macOS apps: check updates, download/install, strip Apple quarantine after upgrades, and safely replace bundles without breaking running apps.
 
@@ -17,34 +37,34 @@ A macOS CLI package manager (`rpm`) for **unsigned** and custom macOS apps: chec
 
 ---
 
-## Design principles
+## Design Principles
 
 | Principle | Meaning |
 |---|---|
-| Learn Rust | Clear, idiomatic, functional Rust |
-| Good CLI | pip-like: clear commands, colors, friendly errors |
-| Don't break | Atomic directory swap, backup/rollback, running app checks, unmanaged app protection |
-| Be fast | Reasonable timeouts, stream downloads with single-pass hashing |
-| Easy to install | Low friction to get `rpm` onto a machine |
-| Recipe-driven | Declarative TOML recipes decoupled from host APIs |
-| Stay in scope | Drive work from this file; expand only with user OK |
+| **Learn Rust** | Clear, idiomatic, functional Rust |
+| **Good CLI** | pip-like: clear commands, colors, friendly errors |
+| **Don't break** | Atomic directory swap, backup/rollback, running app checks, unmanaged app protection |
+| **Be fast** | Reasonable timeouts, stream downloads with single-pass hashing |
+| **Easy to install** | Low friction to get `rpm` onto a machine |
+| **Recipe-driven** | Declarative TOML recipes decoupled from host APIs |
+| **Stay in scope** | Drive work from this file & `TO_DO.md`; expand only with user OK |
 
 ---
 
-## Decided product rules
+## Decided Product Rules
 
-### CLI commands
+### CLI Commands
 
 | Command | Behavior |
 |---|---|
 | `rpm update [-v]` | Scan locally installed apps, check upstream versions; skip updates for unmanaged apps; write `local/cache.toml` (`-v` for verbose output including download URLs, expected SHA-256 hashes, and architecture) |
 | `rpm upgrade [-v] [-c]` | Read cache, download, verify SHA-256, and install pending **managed** apps (`-v` for verbose output, `-c` to bypass cached payloads and force clean download) |
-| `rpm install [-v] [-c] [--upstream | --verified] <app>` | Resolve recipe on demand (local -> native GitHub raw -> Homebrew Cask API); check compatibility conflicts; refuse if target exists but is unmanaged; install atomically and mark `managed` (`-v` for verbose output, `-c` for clean install) |
-| `rpm uninstall <app>` | Safely remove a **managed** app from `/Applications` and clear `managed` in cache |
+| `rpm install [-v] [-c] [--upstream \| --verified] <app>` | Resolve recipe on demand (local -> native GitHub raw -> Homebrew Cask API); check compatibility conflicts; refuse if target exists but is unmanaged; install atomically and mark `managed` (`-v` for verbose output, `-c` for clean install) |
+| `rpm uninstall <app>` | Safely remove a **managed** app from `/Applications`, remove auto-generated Homebrew recipe (`recipes/homebrew/cask/<cask>.toml`), and clear `managed` in cache |
 | `rpm cleanup [app] [-v]` | Remove cached download payloads from `local/staging/` to free disk space or clean specific apps (alias: `rpm clean`) |
-| `rpm list [-v]` | List locally installed packages and their versions (`-v` or `-verbose` for full bundle details and descriptions) |
-| `rpm homebrew [-default | -upstream | -request]` | View or set default download verification track for Homebrew casks (`default` = Homebrew verified SHA-256, `upstream` = direct developer release, `request` = prompt every time) |
-| `rpm self-update [-v]` | Check upstream release of `rpm`, download binary, verify SHA-256, atomically swap binary in `~/.rpm/bin/rpm`, and sync recipes |
+| `rpm list [-v]` | List locally installed packages and their versions (`-v` or `-verbose` for full bundle details, descriptions, and origin badges `[recipe: rpm]`, `[recipe: homebrew (verified)]`, `[recipe: homebrew (upstream)]`) |
+| `rpm homebrew [-default \| -upstream \| -request]` | View or set default download verification track for Homebrew casks (`default` = Homebrew verified SHA-256, `upstream` = direct developer release, `request` = prompt every time) |
+| `rpm self-update [-v]` | Check upstream release of `rpm`, download binary, verify SHA-256, atomically swap binary in `/opt/rpm/bin/rpm`, and sync recipes |
 | `rpm help` | Show usage, available commands, and tracked packages |
 
 App names and aliases are matched case-insensitively (`qbt` → `qBittorrent`, `chrome` → `Chromium`, `librewolf` → `LibreWolf`). All version outputs across all commands are standardized in square brackets `[<version>]`.
@@ -65,72 +85,26 @@ Certain applications cannot coexist safely on macOS (for example, stable `Chromi
 3. **Bidirectional Resolution**: Protects against conflicts whether declared directly on the target recipe or declared by an existing installed recipe against the incoming target.
 4. **Friendly Migration Guidance**: Aborts with clear actionable instructions showing how to uninstall the conflicting package first via `cargo run -- uninstall <app>`.
 
-### Standalone CLI & Distribution Roadmap
+### Dual-Mode Paths Engine (`src/paths.rs`)
+- **Local Dev Mode**: Automatically detected when `./recipes/` and `Cargo.toml` exist in the current working directory (or overridden by `RPM_DEV=1`/`RPM_DIR`). Uses `./recipes/`, `./local/cache.toml`, and `./local/staging/`.
+- **Installed System Mode**: When run outside the repository, uses:
+  - Binary: `/opt/rpm/bin/rpm` (added to system `$PATH` via `/etc/paths.d/rpm`).
+  - Persistent Recipes: `~/.rpm/recipes/*.toml`.
+  - Persistent State: `~/.rpm/cache.toml`.
+  - Download Cache: `~/Library/Caches/rpm/staging/` (macOS-compliant purgeable cache; auto-cleaned on disk pressure without breaking `rpm` state).
 
-The roadmap transitions `rpm` from running via `cargo run --` into a standalone, distribution-ready CLI tool. Completed work is tracked by release version, while future milestones are organized by feature area without premature version locking:
-
-#### Completed: Standalone Binary & Dual-Mode Paths Engine (v0.3.0 / v0.3.1)
-1. **Cargo Binary Definition**: Defined `[[bin]] name = "rpm" path = "src/main.rs"` in `Cargo.toml`.
-2. **Dual-Mode Paths Engine (`src/paths.rs`)**:
-   - **Local Dev Mode**: Automatically detected when `./recipes/` and `Cargo.toml` exist in the current working directory (or overridden by `RPM_DEV=1`/`RPM_DIR`). Uses `./recipes/`, `./local/cache.toml`, and `./local/staging/`.
-   - **Installed System Mode**: When run outside the repository, uses:
-     - Binary: `/opt/rpm/bin/rpm` (added to system `$PATH` via `/etc/paths.d/rpm`).
-     - Persistent Recipes: `~/.rpm/recipes/*.toml`.
-     - Persistent State: `~/.rpm/cache.toml`.
-     - Download Cache: `~/Library/Caches/rpm/staging/` (macOS-compliant purgeable cache; auto-cleaned on disk pressure without breaking `rpm` state).
-3. **Local Developer Installer & Uninstaller (`scripts/install-local.sh`, `scripts/uninstall-local.sh`)**:
-   - `install-local.sh`: Compiles release binary (`cargo build --release`), creates `/opt/rpm/bin`, guarantees correct user ownership (`$SUDO_USER`), registers in `/etc/paths.d/rpm`, and seeds `~/.rpm/recipes/`.
-   - `uninstall-local.sh`: Removes `/opt/rpm`, unregisters `/etc/paths.d/rpm`, and interactively prompts whether to clean `~/.rpm` and `~/Library/Caches/rpm`.
-
-#### Completed: Index-Free On-Demand Resolution & Homebrew Cask Integration
-To eliminate catalog disk bloat, avoid slow bulk recipe synchronizations, and dispense with maintaining thousands of recipes manually, `rpm` adopts an index-free on-demand resolution model with first-class Homebrew Cask integration:
-
-1. **Dual-Mode Configuration Engine (`src/config.rs`)**:
-   - Dual-mode configuration file: `<repo>/local/config.toml` (dev mode) and `~/.rpm/config.toml` (installed system mode).
-   - Manages Homebrew track setting: `[homebrew] track = "request"` (options: `"default"` | `"upstream"` | `"request"`).
-   - CLI command: `rpm homebrew [-default | -upstream | -request]`. When executed without arguments, prints the currently active configuration.
-   - Default setting is `"request"`, prompting user interactively during Cask installation unless configured otherwise.
-2. **Recursive Recipe Layout (`src/recipe.rs`)**:
-   - Updates `load_recipes_from_dir` to recursively scan subdirectories.
-   - Native curated recipes: `recipes/rpm/*.toml` (or `~/.rpm/recipes/rpm/*.toml`).
-   - Imported Homebrew casks: `recipes/homebrew/cask/*.toml` (or `~/.rpm/recipes/homebrew/cask/*.toml`), reserving `recipes/homebrew/formula/` for future CLI packages.
-   - Subdirectory separation ensures updating native `rpm` recipes never overwrites or interferes with user's locally imported Homebrew casks.
-3. **Index-Free On-Demand Resolution Waterfall (`rpm install <query>`)**:
-   - When a user runs `rpm install <query>`:
-     1. Checks if recipe is already installed or cached in `~/.rpm/recipes/**/*.toml`.
-     2. If not found, checks Rory's Package Manager upstream GitHub: `raw.githubusercontent.com/rorymiley/rorys-package-manager/master/recipes/rpm/<query>.toml`. If 200 OK, downloads directly to `~/.rpm/recipes/rpm/<query>.toml` and proceeds to install.
-     3. If not found, checks Homebrew Cask public API: `formulae.brew.sh/api/cask/<query>.json`. If 200 OK, triggers the Dual-Track Homebrew Cask Importer.
-     4. If neither exists (both 404), aborts with a friendly error: `Package '<query>' not found in rpm recipes or Homebrew casks.`
-   - Alias support: Git symlinks in `recipes/rpm/` (e.g. `qbt.toml -> qbittorrent.toml`) allow raw GitHub lookups to resolve shorthand queries without an index.
-4. **Dual-Track Homebrew Cask Importer**:
-   - Evaluates `config.toml` setting (or interactive prompt if `track = "request"`):
-     - **Track 1 (`default` / `verified`)**: Tracks Homebrew's JSON API with pre-verified SHA-256 and tested download URL.
-     - **Track 2 (`upstream`)**: Tracks direct developer source (e.g. GitHub releases) with dynamic checksum calculation on download for zero-day updates.
-   - Converts Homebrew metadata into an `rpm` TOML recipe, sets `quarantine_strip = true`, and saves to `~/.rpm/recipes/homebrew/cask/<cask>.toml`.
-   - Can be overridden ad-hoc per command via `--verified` or `--upstream`.
-5. **Streamlined CLI (Removal of `list-all`)**:
-   - Deprecates and removes `rpm list-all` from CLI dispatch and help.
-   - `rpm list` continues listing locally installed and managed packages.
-   - `rpm update` checks updates only for locally installed packages, hitting only their individual ~2 KB endpoints.
-   - `cache.toml` tracks Homebrew-derived apps with identical fields (`managed`, `local_version`, `remote_version`, `download_url`, `sha256`).
-
-#### Future: Roadmap & To-Do List
-1. **Install Output Transparency & Verbosity Overhaul (`rpm install <app>`)**:
-   - Update `rpm install <app>` info to explicitly display whether the package is sourced from native `rpm` recipes or `homebrew` casks (including track: verified vs. upstream).
-   - Standardize default vs. verbose (`-v`) output for `rpm install`: keep default installation clean and informative while placing detailed payload URLs, staging paths, checksums, and extraction steps strictly behind `-v`.
-2. **Native Self-Update (`rpm self-update`)**:
-   - Queries GitHub Releases for new `rpm` releases.
-   - Downloads, verifies SHA-256, and atomically replaces the installed binary.
-   - `rpm update` alerts the user with a pip/brew-style banner when a new version of `rpm` is available.
-3. **One-Liner Web Installer (`install.sh`)**:
-   - Installs via `curl -fsSL https://raw.githubusercontent.com/rorymiley/rorys-package-manager/master/install.sh | sh`.
-   - Detects architecture (`arm64` vs `x86_64`), downloads release binary, sets up `~/.rpm/`, seeds initial catalog index, and configures `$PATH`.
+### Index-Free On-Demand Resolution Waterfall (`rpm install <query>`)
+1. Checks local recipes in `recipes/rpm/*.toml` and `recipes/homebrew/cask/*.toml`.
+2. If found locally as a Homebrew recipe, checks if the user passed an explicit track override (`--upstream` or `--verified`). If the track differs, regenerates the recipe from Homebrew API.
+3. If not found locally, checks native GitHub raw repository: `raw.githubusercontent.com/rorymiley/rorys-package-manager/master/recipes/rpm/<query>.toml`. If 200 OK, saves to `recipes/rpm/<query>.toml` and proceeds.
+4. If not found natively, checks Homebrew Cask public API: `formulae.brew.sh/api/cask/<query>.json`. If 200 OK, triggers the Dual-Track Homebrew Cask Importer and saves to `recipes/homebrew/cask/<cask>.toml`.
+5. If neither exists (both 404), aborts with a friendly error: `Package '<query>' not found in rpm recipes or Homebrew casks.`
 
 ---
 
 ## How to Add New Packages (TOML Recipe Guide)
 
-Package recipes live in the `recipes/rpm/` directory as individual TOML files (`recipes/rpm/<app_name>.toml`). Adding a new package requires **zero Rust recompilation**.
+Package recipes live in `recipes/rpm/<app_name>.toml`. Adding a new package requires **zero Rust recompilation**.
 
 ### Recipe TOML Schema
 
@@ -145,7 +119,7 @@ sha256 = "optional_expected_sha256_hash"
 conflicting_applications = ["ConflictingAppOrAlias"]
 
 [source]
-type = "github_release | codeberg_release | chromium_snapshot | direct_url"
+type = "github_release | codeberg_release | chromium_snapshot | direct_url | homebrew_cask"
 locator = "owner/repository"
 
 [source.asset_filter]
@@ -154,325 +128,22 @@ x86_64 = "regex_pattern_for_intel"
 fallback = "regex_pattern_fallback"
 
 [livecheck]
-strategy = "github_latest_release | codeberg_latest_release | chromium_dash | raw_url | regex_scrape"
+strategy = "github_latest_release | codeberg_latest_release | chromium_dash | raw_url | regex_scrape | homebrew_cask"
 channel = "Stable"
 url = "https://example.com/downloads"
 regex = "(?P<version>[0-9]+(\\.[0-9]+)+)"
 ```
 
-### Fields Reference
-
-1. **`name`** *(String, required)*: The canonical display name of the package.
-2. **`aliases`** *(Array of Strings, optional)*: Shorthand names accepted by `install`, `uninstall`, and `list` (e.g. `["qbt"]`, `["chrome"]`).
-3. **`bundle_name`** *(String, required)*: The exact `.app` folder name installed into `/Applications` (e.g. `qBittorrent.app`, `Chromium.app`).
-4. **`homepage`** *(String, optional)*: Website URL.
-5. **`description`** *(String, optional)*: Description printed in `rpm list`.
-6. **`quarantine_strip`** *(Boolean, optional, default: `true`)*:
-   - `true`: Runs `xattr -dr com.apple.quarantine` on the staged bundle (essential for unsigned third-party software).
-   - `false`: Leaves quarantine untouched (useful for signed/notarized packages).
-7. **`sha256`** *(String, optional)*: Expected SHA-256 hash. If provided, the installer strictly verifies the download against this hash before mounting or staging.
-8. **`conflicting_applications`** *(Array of Strings, optional)*: Canonical names, aliases, or bundle names of applications that cannot be installed alongside this package (e.g. `["Chromium Snapshot"]`). Supports aliases: `conflicts_with`, `conflicts`, `conflicting_apps`.
-9. **`source`** *(Object, required)*:
-   - **`github_release`**: GitHub repository (`locator = "owner/repo"`). Automatically scans recent releases for valid macOS containers (`.dmg`, `.zip`, `.tar.gz`, `.tar.xz`). Supports optional regex `asset_filter`.
-   - **`codeberg_release`**: Codeberg/Gitea repository (`locator = "owner/repo"`).
-   - **`chromium_snapshot`**: Downloads snapshot zip from Google storage buckets (`channel = "auto"` selects `Mac_Arm` or `Mac`).
-   - **`direct_url`**: Formats a download URL using `{version}` and `{arch}` tokens (e.g. `url_template = "https://example.com/v{version}/App-{arch}.dmg"`).
-10. **`livecheck`** *(Object, required)*:
-   - **`github_latest_release`**: Queries GitHub API.
-   - **`codeberg_latest_release`**: Queries Codeberg API.
-   - **`chromium_dash`**: Queries Chromium Dash release endpoint with `channel` (`"Stable"`, `"Beta"`, `"Dev"`, `"Canary"`).
-   - **`raw_url`**: Fetches a plain-text manifest (e.g. `LAST_CHANGE`).
-   - **`regex_scrape`**: Fetches an HTML page and extracts the version via regex capture group `(?P<version>...)`.
-
-### Step-by-Step: Adding a New Package
-
-1. **Create the Recipe File**:
-   Create `recipes/<app_id>.toml`.
-   
-   *Example: GitHub-hosted App (`recipes/vlc.toml`)*:
-   ```toml
-   name = "VLC"
-   aliases = ["vlc"]
-   bundle_name = "VLC.app"
-   homepage = "https://www.videolan.org/vlc/"
-   quarantine_strip = true
-
-   [source]
-   type = "github_release"
-   locator = "videolan/vlc"
-
-   [livecheck]
-   strategy = "github_latest_release"
-   ```
-
-   *Example: Webpage Scraped App (`recipes/custom-app.toml`)*:
-   ```toml
-   name = "CustomApp"
-   aliases = ["capp"]
-   bundle_name = "CustomApp.app"
-   quarantine_strip = true
-
-   [source]
-   type = "direct_url"
-   url_template = "https://example.com/downloads/CustomApp-{version}.dmg"
-
-   [livecheck]
-   strategy = "regex_scrape"
-   url = "https://example.com/downloads"
-   regex = "CustomApp-([0-9.]+)\\.dmg"
-   ```
-
-2. **Verify Detection**:
-   Run:
-   ```sh
-   cargo run -- list
-   ```
-   Confirm that your new recipe appears in the list with its aliases and local installation status.
-
-3. **Check Version & Upstream Resolution**:
-   Run:
-   ```sh
-   cargo run -- update
-   ```
-   Confirm that the livecheck strategy resolves the remote version and displays the correct status badge (`Current`, `Update available`, or `Ahead of upstream`).
-
-4. **Test Installation**:
-   Run:
-   ```sh
-   cargo run -- install <alias>
-   ```
-   Verify that the archive is downloaded, SHA-256 is computed/checked, atomic directory swap occurs, and quarantine is stripped.
-
 ---
 
-## Architecture (Implemented V0.2.0 Modules)
+## Core Architecture Overview
 
-### 1. Recipe Loader — `src/recipe.rs`
-- Defines `Recipe`, `SourceConfig`, `LivecheckConfig`, and `RecipeOrigin` (`Rpm` vs `Homebrew { track: String }`).
-- Loads and parses all TOML manifests under `recipes/` recursively across `recipes/rpm/` and `recipes/homebrew/cask/`.
-- Determines recipe origin and download track (`origin()`) via explicit manifest metadata, file paths, and source/livecheck types.
-- Supports `conflicting_applications` with serde aliases (`conflicts_with`, `conflicts`, `conflicting_apps`).
-- Resolves aliases case-insensitively.
-
-### 2. Version Engine — `src/version.rs`
-- Parses version strings into numeric segments and pre-release/revision identifiers.
-- Implements `Ord`, `PartialOrd`, and semantic `PartialEq` (`5.0.1 > 5.0.0`, `1.2.10 > 1.2.9`, `2.0.0 > 2.0.0-rc1`).
-- Differentiates true pre-release tags (`rc`, `beta`, `alpha`, `dev`) from package build revisions (`-1`, `-1.1`). Numeric package revisions are evaluated properly (e.g. `156.0.1-1 == 156.0.1-1`, `156.0.1-2 > 156.0.1-1`), avoiding false "Ahead of upstream" warnings.
-- Defines `VersionComparison` (`UpToDate`, `UpdateAvailable`, `AheadOfUpstream`, `NotInstalled`).
-
-### 3. Network & Livecheck Engine — `src/network.rs`
-- Single-pass download streaming with SHA-256 calculation (`sha2` crate).
-- Atomic destination staging: writes streaming downloads to temporary `<dest>.part` before verifying SHA-256 and atomically promoting to `<dest>`, preventing incomplete transfers from corrupting staging.
-- Pluggable livecheck resolver (GitHub, Codeberg, Chromium Dash, raw URLs, regex scraping).
-- Architecture detection (`arm64` vs `x86_64`) and multi-container asset filtering (`.dmg`, `.zip`, `.tar.gz`, `.tar.xz`).
-- Robust scoring prioritizing `.dmg` > `.zip` > `.tar.*` while strictly filtering out Linux, Windows, AppImage, and Debian packages.
-- Scans recent releases to find the latest valid macOS build even if a release tag omitted macOS binaries.
-
-### 4. Progress & Download UI — `src/progress.rs`
-- Pip-style dynamic terminal progress bar with classic solid orange blocks (`█`) and dim grey shaded background track (`░`).
-- Left-aligned 6-character percentage (`  0%` to `✓ 100%`) keeping bracket positions rock-steady.
-- Real-time downloaded/total MB counter, smoothed download speed (EMA), and remaining ETA countdown.
-- Dynamic terminal scaling via `terminal_size` crate: strictly prevents line wraps on window resizing with `\r\x1b[K` carriage return and line clearing.
-- 100% completion rendering with green checkmark, total duration, and average speed.
-- Automatic TTY detection falling back to clean summary output in non-interactive environments (CI, pipes).
-
-### 5. Local Core & Process Management — `src/local.rs`
-- Reads version from `/Applications/<bundle_name>/Contents/Info.plist` (supporting `CFBundleShortVersionString`, `CFBundleVersion`, and snapshot `SCMRevision` commit positions).
-- Extended attribute version tagging (`user.rpm.version`): stamps full package version onto managed bundles and reads it back via `get_bundle_rpm_version`, preserving packager revision suffixes (such as `-1` or `-1.1`) that `CFBundleShortVersionString` in `Info.plist` omits.
-- Active process detection via `pgrep` to prevent modifying active executables in place.
-- Graceful shutdown requests via AppleScript (`osascript`).
-- Structural bundle validation (`validate_app_bundle` checking `Contents/Info.plist` and `Contents/MacOS`).
-- Path-based quarantine removal (`xattr -dr com.apple.quarantine`).
-- System application registration (`register_app_with_system`): executes `touch` (mtime refresh for FSEvents), `lsregister -f` (Launch Services force-registration), and `mdimport` (Spotlight metadata indexer), ensuring newly installed applications immediately appear in Launchpad, Dock, and Spotlight search.
-- System application unregistration (`unregister_app_from_system`): executes `lsregister -u` to deregister removed bundles from Launch Services upon `rpm uninstall`.
-
-### 6. Installer Engine — `src/installer.rs`
-- Archive extractors:
-  - Unattended DMG mounting (`hdiutil attach` with `-nobrowse`, `-readonly`, `-noverify`, and piped license acceptance).
-  - ZIP extraction (`ditto -x -k`).
-  - TAR extraction (`tar -xzf`, `tar -xJf`).
-- **Cached Payload Reuse**:
-  - `download_for_app` checks whether a non-empty payload already exists in `local/staging/`.
-  - Verifies local file SHA-256 using `calculate_file_sha256`; reuses verified downloads without re-downloading if interrupted or re-run.
-  - Automatically purges and redownloads corrupt or mismatched files.
-- **Staging Cleanup**:
-  - `cleanup_staging`: Purges all cached payload archives or targets files matching a specific app/alias, calculating and reporting total freed disk space.
-  - `format_bytes`: Formats byte counts into human-readable B, KB, MB, and GB units.
-- **Configurable Verbosity**:
-  - Functions accept `verbose: bool` to selectively display or suppress intermediate extraction, staging, DMG mounting, Gatekeeper quarantine stripping, and backup steps while keeping active process warnings visible.
-- **Compatibility & Conflict Handler**:
-  - `check_conflicting_apps`: Verifies that no mutually exclusive applications or bundles are currently installed before installation begins.
-- **Atomic Swap Protocol**:
-  1. Detects running app and warns/prompts.
-  2. Renames existing `/Applications/<bundle_name>` to `.rpm-backup-<timestamp>`.
-  3. Strips quarantine on the staged directory.
-  4. Relocates staged bundle into `/Applications/<bundle_name>` via fast atomic filesystem move (`fs::rename`, $O(1)$) with automatic fallback to copy if cross-device (`EXDEV`).
-  5. Strips quarantine on the installed `/Applications/<bundle_name>` bundle.
-  6. Registers bundle with Launch Services and Spotlight (`register_app_with_system`).
-  7. On success: deletes backup.
-  8. On failure: restores backup immediately (rollback).
-
-### 7. Update Cache — `src/cache.rs`
-- Manages `local/cache.toml`.
-- Records `name`, `local_version`, `remote_version`, `download_url`, `update_available`, `managed`, and `sha256`.
-- `pending_upgrades`: Strictly filters for `managed && update_available && !download_url.is_empty()`.
-- `was_managed`: Helper checking if an app was previously installed by `rpm`.
-
-### 8. CLI Dispatch — `src/cli.rs` + thin `src/main.rs`
-- Commands: `update`, `upgrade`, `install`, `uninstall`, `cleanup` (alias `clean`), `list`, `list-all`, `help`.
-- `list [-v]` only lists installed packages; verbose mode displays full bundle details, managed status, and recipe origin/track badges (`[recipe: rpm]`, `[recipe: homebrew (verified)]`, or `[recipe: homebrew (upstream)]`). Supports `-list` and `--list` aliases.
-- Supports `-v` / `--verbose` / `-verbose` across `update`, `install`, `upgrade`, `cleanup`, and `list` for detailed inspection (suppressing payload URLs, full SHA-256 digests, status tags, and intermediate extraction steps in default mode).
-- Clean install flag (`-c` / `--clean`): purges existing cached payloads in staging and forces fresh download and installation even if currently up to date.
-- Pre-flight conflict rejection in `cmd_install` aborting incompatible installations before network operations.
-- Rejection of installs targeting unmanaged existing applications, presenting clear migration steps.
-
----
-
-## Session History
-
-### 2026-09-25
-- Initial project creation and scoping for v0.1.
-- Documented Homebrew/apt/pacman-style safe install norms.
-- Implemented baseline `local.rs`, `network.rs`, `cache.rs`, `installer.rs`, and `cli.rs`.
-
-### 2026-09-29
-- **V0.2.0 Architecture Overhaul (Homebrew Modernization)**:
-  - Replaced hardcoded catalog with declarative JSON recipes (`recipes/*.json`) and loader (`src/recipe.rs`).
-  - Implemented semantic versioning and ordering (`src/version.rs`) replacing naive `!=` string matching.
-  - Added single-pass SHA-256 verification to `src/network.rs`.
-  - Added pluggable livecheck engine supporting GitHub, Codeberg, Chromium Dash, and regex scraping.
-  - Completed Chromium handler natively via `recipes/chromium.json` and snapshot archives.
-  - Implemented active process detection (`pgrep`), graceful quit, and atomic directory swap in `src/installer.rs`.
-  - Added support for `.tar.gz` and `.tar.xz` archives, and automated DMG license agreement bypassing.
-  - Cleaned up compiler warnings, verified all unit tests pass, and pushed changes to `origin/master`.
-- **Unmanaged Package Protection (Homebrew Cask Integrity Pattern)**:
-  - Analyzed Homebrew Cask collision handling (`moved.rb`).
-  - Added multi-layer collision protection across CLI (`cmd_install`), installer (`install_recipe`, `install_bundle_pipeline`, `install_app_bundle_atomic`), and cache (`pending_upgrades`).
-  - Enforced refusal to overwrite or automatically update unmanaged existing applications in `/Applications`.
-  - Provided user-friendly error messages instructing how to uninstall outside `rpm` and reinstall via `cargo run -- install <app>`.
-  - Enhanced `rpm list` to show `[unmanaged]` vs `[managed]` status badges.
-- **LibreWolf Recipe Addition & macOS Binary Resolution Fix**:
-  - Added recipe for LibreWolf browser (`recipes/librewolf.json`) tracking releases from Codeberg (`librewolf/bsys6`).
-  - Enhanced `pick_mac_download_url` in `src/network.rs` with strict non-macOS filtering (excluding AppImage, deb, rpm, and Windows packages) and scoring prioritizing `.dmg` > `.zip` > `.tar.*`. Added unit tests.
-- **CLI Clean-up & List/List-all Separation**:
-  - `rpm list` now lists only installed packages in clean `• Name [version]` format, with `-v` or `-verbose` for full details.
-  - Added `rpm list-all` to inspect the entire available recipe catalog.
-  - `rpm update` scans only locally installed packages instead of uninstalled catalog recipes.
-  - Standardized all version numbers inside square brackets `[...]` across `list`, `list-all`, `update`, `upgrade`, and `install`.
-- **Chromium Snapshot vs Stable Chromium Separation**:
-  - Separated continuous snapshot builds (`recipes/chromium-snapshot.json`, targeting `Chromium Snapshot.app`) from stable Ungoogled Chromium (`recipes/chromium.json`, targeting `Chromium.app`).
-  - Added continuous commit revision parsing (`SCMRevision` containing `@{#<rev>}`) in `src/local.rs` for snapshot builds while preserving semantic versioning for stable builds.
-- **Mutual Package Conflict & Compatibility Protection**:
-  - Added `conflicting_applications` to `Recipe` schema (`src/recipe.rs`) with serde aliases (`conflicts_with`, `conflicts`, `conflicting_apps`).
-  - Added mutual conflicts between `recipes/chromium.json` and `recipes/chromium-snapshot.json`.
-  - Implemented `check_conflicting_apps` in `src/installer.rs` verifying conflicts against installed applications, aliases, and bundle paths with bidirectional resolution.
-  - Integrated pre-flight check into `cmd_install` in `src/cli.rs` and defense-in-depth verification into `install_recipe` in `src/installer.rs`.
-- **Pip-Style Dynamic Download UI (`src/progress.rs`)**:
-  - Implemented dynamic terminal progress bar featuring solid orange blocks (`█`) and dim grey shaded track (`░`).
-  - Includes real-time downloaded/total MB counter, EMA-smoothed transfer speed, and remaining ETA countdown timer.
-  - Dynamically resizes to the CLI window width on each frame via `terminal_size`, maintaining strict bounds `<= terminal_width - 1` to prevent unwanted line wrapping.
-  - Leaves 100% completed bar visible with a green checkmark (`✓ 100%`) before printing the SHA-256 verification line.
-  - Hooked into `download_file_with_hash` in `src/network.rs` for both `install` and `upgrade` commands.
-  - Added unit tests covering speed, ETA, bounds, indeterminate streams, and terminal width scaling (40-140 columns).
-- **Verbose Output Filtering (`-v` / `--verbose`) & Cached Payload Reuse**:
-  - Added `-v`, `--verbose`, and `-verbose` flag parsing across `rpm install` and `rpm upgrade`.
-  - Filtered output to be clean and minimal by default: showing pip progress bar and `🔒 SHA-256 Verified` without raw URLs, full hash hex digests, or intermediate extraction/staging logs unless verbose mode is requested.
-  - Implemented cached payload reuse in `src/installer.rs`: checks `local/staging/` for complete files matching the expected SHA-256 hash before downloading, avoiding repeated downloads when installs are delayed or interrupted (e.g. when waiting for a running app to close).
-  - Added atomic `.part` download staging in `src/network.rs` ensuring broken downloads never leave corrupt files at destination paths.
-  - Preserved active running process warning (`⚠️ Notice: <app> is currently running`) across both standard and verbose modes.
-  - Added unit tests for file SHA-256 calculation and verified both modes live on disk.
-- **Staging Cleanup, Clean Installs (`-c`), and Package Revision (`-X`) Version Tracking**:
-  - Implemented `rpm cleanup [app]` command (with alias `clean`): cleans all archives from `local/staging/` or filters by specific app/alias and reports freed disk space.
-  - Added `-c` / `--clean` flag to `rpm install` and `rpm upgrade`: purges cached payloads and forces a fresh download and installation even if currently up to date.
-  - Fixed local version omission of package revisions (`-1` on LibreWolf, `-1.1` on Chromium): implemented `user.rpm.version` macOS extended attribute stamping (`set_bundle_rpm_version`, `get_bundle_rpm_version`) and cache fallback, ensuring the full release version string is preserved.
-  - Enhanced `version.rs` to differentiate package build revisions (numeric suffixes like `-1`, `-1.1`) from pre-releases (`rc`, `beta`, `alpha`), eliminating spurious `Ahead of upstream` warnings.
-  - Expanded unit test suite to 20 tests covering `format_bytes`, `cleanup_dir`, and build revision ordering.
-- **Clean Standard Update Output & Verbose Mode (`update [-v]`)**:
-  - Differentiated standard vs verbose output for `rpm update`:
-    - Standard mode (`cargo run -- update`) prints a minimal check displaying `🔍 Checking <App>...` and `Local: [<ver>] ==/>/< Upstream: [<ver>]` while omitting `(Current)`, `[managed]`, `[unmanaged]`, remote download URLs, expected SHA-256 digests, and system architecture headers.
-    - Verbose mode (`cargo run -- update -v` / `--verbose`) preserves full diagnostic output with system architecture, emoji badges (`✨`, `🚀`, `💎`, `⚠️`), status labels, payload URLs, expected SHA-256 hashes, and cache metadata.
-    - Added immediate stdout flushing during version checks for real-time progress feedback.
-- **V0.3.0 Standalone CLI Architecture & Roadmap Scoping**:
-  - Outlined transition to a full standalone CLI package manager (`rpm <command>`) installed via `curl -fsSL ... | sh`.
-  - Defined macOS compliant storage layout separating persistent data (`~/.rpm/`) from purgeable download cache (`~/Library/Caches/rpm/staging/`).
-  - Planned dynamic dev mode resolution (`src/paths.rs`) enabling seamless dual operation between `cargo run` development and installed CLI execution.
-  - Specified upstream recipe synchronization during `rpm update` and native in-place self-updating (`rpm self-update`).
-  - Added new V0.3.0 scope to `GEMINI.md` per user approval.
-
-### 2026-10-01
-- **V0.2.0 Architecture Versioning Retrospective**:
-  - Relabeled all V2 architecture overhaul references in `GEMINI.md` to V0.2.0.
-- **TOML Recipe & State Cache Migration**:
-  - Migrated declarative recipe manifest format from JSON (`recipes/*.json`) to TOML (`recipes/*.toml`).
-  - Converted existing recipes: `recipes/qbittorrent.toml`, `recipes/librewolf.toml`, `recipes/chromium.toml`, and `recipes/chromium-snapshot.toml`.
-  - Migrated update cache from `local/cache.json` to `local/cache.toml`.
-  - Removed `serde_json` direct dependency from `Cargo.toml` in favor of `toml = "0.8"`.
-  - Updated `src/recipe.rs` to parse `.toml` files via `toml::from_str` and updated unit tests.
-  - Updated `src/cache.rs` to serialize and deserialize `local/cache.toml` via `toml::to_string_pretty` and `toml::from_str`.
-  - Bumped version to `0.2.1` in `Cargo.toml`.
-  - Switched `src/cli.rs` `print_help` to use `env!("CARGO_PKG_VERSION")`, baking the version into the binary at compile time.
-  - Re-scoped standalone distribution roadmap into three phased milestones: v0.3.0 (Binary & Dual-Mode Paths), v0.4.0 (Upstream Recipe Synchronization), and v0.5.0 (Native Self-Update & Web Installer).
-  - **Phase 1: Standalone Binary & Dual-Mode Paths Engine (v0.3.0 Implementation)**:
-    - Added `[[bin]] name = "rpm" path = "src/main.rs"` and bumped version to `0.3.0` in `Cargo.toml`.
-    - Implemented `src/paths.rs` supporting automatic Dev Mode (`./recipes`, `./local/cache.toml`, `./local/staging`) and Installed System Mode (`/opt/rpm/bin/rpm`, `~/.rpm/recipes`, `~/.rpm/cache.toml`, `~/Library/Caches/rpm/staging`).
-    - Integrated `paths.rs` into `recipe.rs`, `cache.rs`, `installer.rs`, and `cli.rs`.
-    - Added dynamic `paths::runner_cmd()` formatting messages as `cargo run --` in dev mode and `rpm` in installed mode.
-    - Created `scripts/install-local.sh` and `scripts/uninstall-local.sh` automating release build, system installation with user ownership, clean uninstallation with `~/.rpm` cleanup prompt, and `/etc/paths.d/rpm` management.
-    - Successfully verified system installation, dual-mode execution, and confirmed all 23 unit tests pass.
-- **V0.3.1 Progress Bar Stability & Permission Fixes**:
-  - Eliminated download progress bar jitter: fixed-width formatting for speed (`{:>10}`), downloaded MB padding relative to total, and uniform ETA (`{:>6}`), keeping bracket positions invariant across speed and byte changes while dynamically scaling with terminal resize.
-  - Added unit tests verifying stable bar lengths across speeds (0 B/s to 1 GB/s) and byte progress.
-  - Fixed installer scripts (`scripts/install-local.sh`, `scripts/uninstall-local.sh`) to detect `$SUDO_USER` and guarantee user ownership on `~/.rpm`, `/opt/rpm`, and cache directories.
-  - Enhanced cache write error reporting with actionable `sudo chown` recovery guidance.
-  - Bumped version to `0.3.1`.
-
-### 2026-10-02
-- **Roadmap Restructuring & Sparse Catalog Index Architecture**:
-  - Removed rigid version numbers (`v0.4.0`, `v0.5.0`) from future roadmap milestones in favor of feature-driven scopes.
-  - Shifted recipe sync strategy from bulk file mirroring to a Homebrew-inspired **Sparse Catalog Index & On-Demand Fetching** model.
-  - Defined `recipes/index.toml` architecture for centralized lightweight package metadata, alias mappings, and descriptions.
-  - Designed on-demand single recipe fetching via `raw.githubusercontent.com` upon `rpm install <query>`, avoiding GitHub API 60 req/hr rate limits.
-  - Updated `GEMINI.md` to reflect the new future scope.
-
-### 2026-10-15
-- **Index-Free On-Demand Resolution & Homebrew Cask Integration (Completed)**:
-  - Replaced bulk and sparse index syncing models with an **Index-Free On-Demand Resolution Waterfall** (`rpm install <query>`), querying local recipes first, then native GitHub raw recipes, and finally the Homebrew Cask public API (`formulae.brew.sh/api/cask/<query>.json`).
-  - Implemented the **Dual-Track Homebrew Cask Importer**:
-    - Track 1 (`default` / `verified`): Homebrew verified SHA-256 and tested download URL.
-    - Track 2 (`upstream`): Direct developer upstream source with dynamic checksum calculation on download for zero-day updates.
-    - Automatic Gatekeeper quarantine stripping (`quarantine_strip = true`) applied to all imported bundles.
-  - Implemented the **Dual-Mode Configuration Engine (`src/config.rs`)**:
-    - Stores user preference for Homebrew track (`track = "request" | "default" | "upstream"`).
-    - Added `rpm homebrew [-default | -upstream | -request]` CLI command.
-    - Added `paths::config_file_path()` in `src/paths.rs` and created initial local dev configuration at `local/config.toml` defaulting to `"request"`.
-  - Implemented **Recursive Recipe Loader** in `src/recipe.rs` scanning `recipes/homebrew/cask/*.toml` with canonical name deduplication.
-  - Enforced strict pre-flight refusal in `cmd_install` protecting unmanaged existing `/Applications` bundles before downloading or prompting.
-  - Removed `rpm list-all` from CLI commands and help text in favor of a lean client model.
-  - Added Git alias symlinks in `recipes/` (`qbt.toml`, `chrome.toml`, `chrome-snapshot.toml`, `libwolf.toml`).
-  - Expanded unit test suite from 25 to 30 tests (all passing).
-  - Bumped version to `0.4.0` in `Cargo.toml` and git tagged `0.4.0`.
-- **Fast Move-Based Relocation & Instant Spotlight/Launch Services Registration**:
-  - Replaced slow recursive `ditto` bundle copy with fast atomic filesystem move (`fs::rename`, $O(1)$) from staging into `/Applications`, eliminating redundant SSD writes on APFS with automatic fallback to copy if cross-device (`EXDEV`).
-  - Added two-phase Gatekeeper quarantine stripping: stripped on staged bundle and re-stripped on the destination `/Applications/<bundle>.app` after relocation.
-  - Implemented `local::register_app_with_system` executing `touch` (mtime refresh for FSEvents), `lsregister -f` (Launch Services force-registration), and `mdimport` (Spotlight indexer) to ensure newly installed applications immediately appear in Spotlight and Launchpad/Dock without opening Finder.
-  - Implemented `local::unregister_app_from_system` calling `lsregister -u` to deregister removed applications during `rpm uninstall`.
-  - Expanded unit test suite to 33 tests (all passing).
-- **Native Recipe Directory Reorganization (`recipes/rpm/`)**:
-  - Moved native curated recipes and alias symlinks into `recipes/rpm/` to strictly separate them from machine-local imported Homebrew casks (`recipes/homebrew/cask/`), preventing updates or syncs from overwriting user-imported casks.
-  - Updated raw GitHub upstream recipe URL in `src/network.rs` (`recipes/rpm/{}.toml`) and `cmd_install` in `src/cli.rs`.
-  - Updated `scripts/install-local.sh` to seed `recipes/rpm/*.toml` to `~/.rpm/recipes/rpm/`.
-  - Bumped version to `0.4.1` in `Cargo.toml` and git tagged `0.4.1`.
-- **Recipe Origin & Track Badges in `rpm list -v` (v0.4.2)**:
-  - Modeled `RecipeOrigin` enum (`Rpm` vs `Homebrew { track }`) in `src/recipe.rs` with `display_label()` and `colored_badge()`.
-  - Stored explicit `origin = "homebrew"` and `track = "verified"` / `track = "upstream"` in generated Cask manifests (`generate_cask_recipe_toml`).
-  - Enhanced `rpm list -v` (`print_recipe_entry`) to display color-coded origin/track badges (`[recipe: rpm]`, `[recipe: homebrew (verified)]`, or `[recipe: homebrew (upstream)]`) alongside bundle details.
-  - Added `-list` and `--list` aliases to CLI dispatch.
-  - Expanded unit test suite to 34 tests (all passing).
-  - Bumped version to `0.4.2` in `Cargo.toml` and git tagged `0.4.2`.
-- **Homebrew Recipe Deletion on Uninstall & Track Switching in `install` (v0.4.3)**:
-  - Added `recipe::remove_cask_recipe`: automatically cleans up generated recipes from `recipes/homebrew/cask/<token>.toml` when an app is uninstalled via `rpm uninstall`, ensuring uninstalled Homebrew casks leave no stale manifests behind.
-  - Native curated recipes in `recipes/rpm/` are strictly preserved and never deleted on uninstall.
-  - Added `Recipe::matches_homebrew_track` and track-aware mismatch detection in `cmd_install`: when a user installs with an explicit `--upstream` or `--verified` flag and the cached recipe was generated on a different track, `rpm` skips the stale manifest, re-fetches the latest cask info from the Homebrew API, and regenerates the recipe for the requested track.
-  - Streamlined `rpm install` default console output: removed redundant `🔒 SHA-256 Verified` line when installing without `-v`.
-  - Added unit tests `test_remove_cask_recipe` and `test_matches_homebrew_track` bringing unit test suite to 36 tests (all passing).
-  - Bumped version to `0.4.3` in `Cargo.toml`.
+- **`src/recipe.rs`**: Recipe manifest definitions, recursive loader, origin/track resolution (`RecipeOrigin`), track matching (`matches_homebrew_track`), and safe removal (`remove_cask_recipe`).
+- **`src/version.rs`**: Version parsing into numeric segments and build revisions; implements semantic `Ord` and `VersionComparison`.
+- **`src/network.rs`**: Single-pass streaming download with SHA-256 verification and atomic `.part` promotion; livecheck resolvers (GitHub, Codeberg, Chromium Dash, Homebrew Cask API).
+- **`src/progress.rs`**: Dynamic terminal progress bar (`█░`) with EMA speed, remaining ETA, and terminal resize scaling.
+- **`src/local.rs`**: Bundle inspection (`Info.plist`), extended attribute version stamping (`user.rpm.version`), process detection (`pgrep`), quarantine removal (`xattr`), and system registration (`lsregister`, `mdimport`, `touch`).
+- **`src/installer.rs`**: Archive extractors (DMG, ZIP, TAR), cached staging payload reuse, staging cleanup (`cleanup_staging`), compatibility checker (`check_conflicting_apps`), and atomic bundle swap protocol.
+- **`src/cache.rs`**: State persistence in `local/cache.toml` (or `~/.rpm/cache.toml`).
+- **`src/config.rs`**: User preferences in `local/config.toml` (or `~/.rpm/config.toml`), managing `[homebrew] track`.
+- **`src/cli.rs` + `src/main.rs`**: CLI command dispatch, interactive track prompting, and argument handling.
