@@ -95,6 +95,24 @@ pub fn resolve_recipe(recipe: &Recipe) -> Result<(String, String), String> {
                 .replace("{arch}", arch);
             Ok((version, url))
         }
+        SourceConfig::HomebrewCask { cask } => {
+            let info = fetch_homebrew_cask_info(cask)?;
+            Ok((info.version, info.download_url))
+        }
+    }
+}
+
+/// Resolves a recipe into its latest version, download URL, and expected SHA-256 hash.
+pub fn resolve_recipe_info(recipe: &Recipe) -> Result<(String, String, Option<String>), String> {
+    match &recipe.source {
+        SourceConfig::HomebrewCask { cask } => {
+            let info = fetch_homebrew_cask_info(cask)?;
+            Ok((info.version, info.download_url, info.sha256))
+        }
+        _ => {
+            let (ver, url) = resolve_recipe(recipe)?;
+            Ok((ver, url, recipe.sha256.clone()))
+        }
     }
 }
 
@@ -120,6 +138,10 @@ pub fn resolve_livecheck(livecheck: &LivecheckConfig, context: &str) -> Result<S
         }
         LivecheckConfig::RegexScrape { url, regex } => {
             fetch_regex_scraped_version(url, regex)
+        }
+        LivecheckConfig::HomebrewCask { cask } => {
+            let info = fetch_homebrew_cask_info(cask)?;
+            Ok(info.version)
         }
     }
 }
@@ -576,6 +598,202 @@ pub fn download_file(url: &str, destination_path: &Path) -> Result<(), String> {
     download_file_with_hash(url, destination_path, None).map(|_| ())
 }
 
+#[derive(Debug, Clone)]
+pub struct HomebrewCaskInfo {
+    pub token: String,
+    pub name: String,
+    pub desc: Option<String>,
+    pub homepage: Option<String>,
+    pub version: String,
+    pub bundle_name: String,
+    pub download_url: String,
+    pub sha256: Option<String>,
+    pub conflicts: Vec<String>,
+    pub disabled: bool,
+    pub disable_reason: Option<String>,
+}
+
+pub fn parse_cask_json_value(val: &serde_json::Value) -> Result<HomebrewCaskInfo, String> {
+    let token = val
+        .get("token")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let name = val
+        .get("name")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.as_str())
+        .unwrap_or(&token)
+        .to_string();
+
+    let desc = val
+        .get("desc")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let homepage = val
+        .get("homepage")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let version = val
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let disabled = val
+        .get("disabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let disable_reason = val
+        .get("disable_reason")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    // Extract bundle_name from artifacts
+    let mut bundle_name = String::new();
+    if let Some(artifacts) = val.get("artifacts").and_then(|v| v.as_array()) {
+        for art in artifacts {
+            if let Some(app_val) = art.get("app").and_then(|v| v.as_array()) {
+                if let Some(first) = app_val.first().and_then(|v| v.as_str()) {
+                    let target = app_val
+                        .get(1)
+                        .and_then(|v| v.get("target"))
+                        .and_then(|v| v.as_str());
+                    bundle_name = target.unwrap_or(first).to_string();
+                    break;
+                }
+            }
+        }
+    }
+    if bundle_name.is_empty() {
+        bundle_name = if name.ends_with(".app") {
+            name.clone()
+        } else {
+            format!("{}.app", name)
+        };
+    }
+
+    let arch = detect_mac_architecture();
+    let default_url = val.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let default_sha = val
+        .get("sha256")
+        .and_then(|v| v.as_str())
+        .filter(|s| *s != "no_check")
+        .map(|s| s.to_string());
+
+    let (download_url, sha256) = if arch == "arm64" {
+        (default_url, default_sha)
+    } else {
+        let mut x86_url = default_url;
+        let mut x86_sha = default_sha;
+
+        if let Some(variations) = val.get("variations").and_then(|v| v.as_object()) {
+            for (key, var) in variations {
+                if !key.starts_with("arm64") {
+                    if let Some(u) = var.get("url").and_then(|v| v.as_str()) {
+                        x86_url = u.to_string();
+                    }
+                    if let Some(s) = var
+                        .get("sha256")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| *s != "no_check")
+                    {
+                        x86_sha = Some(s.to_string());
+                    }
+                    break;
+                }
+            }
+        }
+        (x86_url, x86_sha)
+    };
+
+    let mut conflicts = Vec::new();
+    if let Some(conf_casks) = val
+        .get("conflicts_with")
+        .and_then(|v| v.get("cask"))
+        .and_then(|v| v.as_array())
+    {
+        for c in conf_casks {
+            if let Some(s) = c.as_str() {
+                conflicts.push(s.to_string());
+            }
+        }
+    }
+
+    Ok(HomebrewCaskInfo {
+        token,
+        name,
+        desc,
+        homepage,
+        version,
+        bundle_name,
+        download_url,
+        sha256,
+        conflicts,
+        disabled,
+        disable_reason,
+    })
+}
+
+pub fn fetch_homebrew_cask_info(cask: &str) -> Result<HomebrewCaskInfo, String> {
+    let clean_cask = cask.trim().to_lowercase();
+    let url = format!("https://formulae.brew.sh/api/cask/{}.json", clean_cask);
+    let client = build_client()?;
+
+    let response = client
+        .get(&url)
+        .header("User-Agent", "rorys-package-manager-cli")
+        .send()
+        .map_err(|e| format!("Failed to request Homebrew Cask API: {}", e))?;
+
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(format!("Homebrew cask '{}' not found (404)", clean_cask));
+    }
+    if !response.status().is_success() {
+        return Err(format!(
+            "Homebrew Cask API returned HTTP status {}: {}",
+            response.status(),
+            clean_cask
+        ));
+    }
+
+    let val: serde_json::Value = response
+        .json()
+        .map_err(|e| format!("Failed to parse Homebrew Cask JSON for '{}': {}", clean_cask, e))?;
+
+    parse_cask_json_value(&val)
+}
+
+pub fn fetch_raw_github_recipe(query: &str) -> Result<Option<String>, String> {
+    let clean = query.trim().to_lowercase();
+    let url = format!(
+        "https://raw.githubusercontent.com/rorymiley/rorys-package-manager/master/recipes/{}.toml",
+        clean
+    );
+    let client = build_client()?;
+
+    let response = client
+        .get(&url)
+        .header("User-Agent", "rorys-package-manager-cli")
+        .send()
+        .map_err(|e| format!("Network request failed: {}", e))?;
+
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !response.status().is_success() {
+        return Err(format!("GitHub raw returned HTTP status: {}", response.status()));
+    }
+
+    let body = response.text().map_err(|e| e.to_string())?;
+    Ok(Some(body))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -631,6 +849,32 @@ mod tests {
 
         let result = pick_mac_download_url(assets, "owner/repo", None);
         assert_eq!(result.unwrap(), "https://example.com/app.dmg");
+    }
+
+    #[test]
+    fn test_parse_cask_json_value() {
+        let json_str = r#"{
+            "token": "vlc",
+            "name": ["VLC media player"],
+            "desc": "Multimedia player",
+            "homepage": "https://www.videolan.org/vlc/",
+            "url": "https://get.videolan.org/vlc/3.0.24/macosx/vlc-3.0.24-arm64.dmg",
+            "version": "3.0.24",
+            "sha256": "64a89d93cdd30b0e97131743e246373db82d6826ea882d265d46d74b136da2b7",
+            "artifacts": [
+                {"app": ["VLC.app"]}
+            ],
+            "conflicts_with": {"cask": ["vlc@nightly"]}
+        }"#;
+
+        let val: serde_json::Value = serde_json::from_str(json_str).unwrap();
+        let info = parse_cask_json_value(&val).unwrap();
+
+        assert_eq!(info.token, "vlc");
+        assert_eq!(info.name, "VLC media player");
+        assert_eq!(info.bundle_name, "VLC.app");
+        assert_eq!(info.version, "3.0.24");
+        assert_eq!(info.conflicts, vec!["vlc@nightly"]);
     }
 }
 

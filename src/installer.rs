@@ -1,7 +1,7 @@
 use crate::cache::{self, CachedApp, UpdateCache};
 use crate::local;
 use crate::network;
-use crate::recipe::{self, Recipe};
+use crate::recipe::{self, Recipe, SourceConfig};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -270,12 +270,23 @@ pub fn install_recipe(
         recipe.name, remote_version
     );
 
+    let dynamic_cask_sha = if recipe.sha256.is_none() {
+        if let SourceConfig::HomebrewCask { cask } = &recipe.source {
+            network::fetch_homebrew_cask_info(cask).ok().and_then(|i| i.sha256)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let effective_sha = recipe.sha256.as_deref().or(dynamic_cask_sha.as_deref());
+
     let calculated_hash = install_bundle_pipeline(
         &recipe.name,
         &recipe.bundle_name,
         remote_version,
         download_url,
-        recipe.sha256.as_deref(),
+        effective_sha,
         recipe.quarantine_strip,
         verbose,
         clean,

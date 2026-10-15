@@ -79,6 +79,17 @@ pub fn cache_file_path() -> PathBuf {
     }
 }
 
+/// Path to the configuration file.
+/// - Dev mode: `<repo>/local/config.toml`
+/// - Installed mode: `~/.rpm/config.toml`
+pub fn config_file_path() -> PathBuf {
+    if is_dev_mode() {
+        dev_root().join("local").join("config.toml")
+    } else {
+        user_home_dir().join(".rpm").join("config.toml")
+    }
+}
+
 /// Directory where download archives and payloads are staged.
 /// - Dev mode: `<repo>/local/staging`
 /// - Installed mode: `~/Library/Caches/rpm/staging` (macOS purgeable cache)
@@ -104,6 +115,12 @@ pub fn ensure_dirs() -> Result<(), String> {
     if let Some(parent) = c_path.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create cache directory {}: {}", parent.display(), e))?;
+    }
+
+    let cfg_path = config_file_path();
+    if let Some(parent) = cfg_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create config directory {}: {}", parent.display(), e))?;
     }
 
     let s_dir = staging_dir();

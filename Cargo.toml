@@ -16,6 +16,7 @@ reqwest = {version = "0.12", features = ["blocking","json"]}
 
 # Serde and TOML serialization for recipes and state cache
 serde = {version = "1.0", features = ["derive"]}
+serde_json = "1.0"
 toml = "0.8"
 
 # Cryptographic hashing for download integrity
@@ -24,3 +25,6 @@ sha2 = "0.10"
 # Regular expressions for livecheck and asset matching
 regex = "1.10"
 terminal_size = "0.4.4"
+
+[dev-dependencies]
+tempfile = "3.10"

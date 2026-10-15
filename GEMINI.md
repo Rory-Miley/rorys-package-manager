@@ -39,11 +39,11 @@ A macOS CLI package manager (`rpm`) for **unsigned** and custom macOS apps: chec
 |---|---|
 | `rpm update [-v]` | Scan locally installed apps, check upstream versions; skip updates for unmanaged apps; write `local/cache.toml` (`-v` for verbose output including download URLs, expected SHA-256 hashes, and architecture) |
 | `rpm upgrade [-v] [-c]` | Read cache, download, verify SHA-256, and install pending **managed** apps (`-v` for verbose output, `-c` to bypass cached payloads and force clean download) |
-| `rpm install [-v] [-c] <app>` | Resolve recipe; check compatibility conflicts; refuse if target exists but is unmanaged; install atomically and mark `managed` (`-v` for verbose output, `-c` for clean install) |
+| `rpm install [-v] [-c] [--upstream | --verified] <app>` | Resolve recipe on demand (local -> native GitHub raw -> Homebrew Cask API); check compatibility conflicts; refuse if target exists but is unmanaged; install atomically and mark `managed` (`-v` for verbose output, `-c` for clean install) |
 | `rpm uninstall <app>` | Safely remove a **managed** app from `/Applications` and clear `managed` in cache |
 | `rpm cleanup [app] [-v]` | Remove cached download payloads from `local/staging/` to free disk space or clean specific apps (alias: `rpm clean`) |
 | `rpm list [-v]` | List locally installed packages and their versions (`-v` or `-verbose` for full bundle details and descriptions) |
-| `rpm list-all [-v]` | List all available recipes in catalog and installation status (`-v` or `-verbose` for full details) |
+| `rpm homebrew [-default | -upstream | -request]` | View or set default download verification track for Homebrew casks (`default` = Homebrew verified SHA-256, `upstream` = direct developer release, `request` = prompt every time) |
 | `rpm self-update [-v]` | Check upstream release of `rpm`, download binary, verify SHA-256, atomically swap binary in `~/.rpm/bin/rpm`, and sync recipes |
 | `rpm help` | Show usage, available commands, and tracked packages |
 
@@ -82,23 +82,36 @@ The roadmap transitions `rpm` from running via `cargo run --` into a standalone,
    - `install-local.sh`: Compiles release binary (`cargo build --release`), creates `/opt/rpm/bin`, guarantees correct user ownership (`$SUDO_USER`), registers in `/etc/paths.d/rpm`, and seeds `~/.rpm/recipes/`.
    - `uninstall-local.sh`: Removes `/opt/rpm`, unregisters `/etc/paths.d/rpm`, and interactively prompts whether to clean `~/.rpm` and `~/Library/Caches/rpm`.
 
-#### Future: Sparse Catalog Index & On-Demand Recipe Fetching
-To avoid local disk bloat and eliminate slow bulk recipe synchronizations (mirroring Homebrew's transition to an API/sparse index model), recipes remain hosted upstream and are fetched only on demand:
-1. **Upstream Catalog Index (`recipes/index.toml`)**:
-   - A lightweight central index file hosted in the repository defining package names, recipe filenames, aliases, and short descriptions.
-   - Avoids GitHub REST API rate limits (60 req/hr) by fetching directly from `raw.githubusercontent.com`.
-2. **On-Demand Alias Resolution & Installation**:
-   - When a user runs `rpm install <query>` (e.g. `rpm install qbt`):
-     1. Checks if the recipe is already cached in `~/.rpm/recipes/`.
-     2. If not, queries local/cached `index.toml` (auto-refreshed from upstream when missing or stale).
-     3. Resolves aliases (`qbt` → `qbittorrent.toml`).
-     4. Downloads *only* the specific recipe file (`recipes/qbittorrent.toml`) into `~/.rpm/recipes/`.
-3. **Targeted Updates (`rpm update`)**:
-   - In installed system mode, `rpm update` refreshes `index.toml` and updates recipes *only* for packages currently installed/managed on the user's machine, eliminating bulk downloads for uninstalled packages.
-4. **Instant Catalog Browsing (`rpm list-all`)**:
-   - Reads `index.toml` directly to list available packages and descriptions without downloading full recipe files.
-5. **Dev Mode Isolation**:
-   - Dev mode continues to read local `./recipes/*.toml` files directly, bypassing network calls.
+#### Completed: Index-Free On-Demand Resolution & Homebrew Cask Integration
+To eliminate catalog disk bloat, avoid slow bulk recipe synchronizations, and dispense with maintaining thousands of recipes manually, `rpm` adopts an index-free on-demand resolution model with first-class Homebrew Cask integration:
+
+1. **Dual-Mode Configuration Engine (`src/config.rs`)**:
+   - Dual-mode configuration file: `<repo>/local/config.toml` (dev mode) and `~/.rpm/config.toml` (installed system mode).
+   - Manages Homebrew track setting: `[homebrew] track = "request"` (options: `"default"` | `"upstream"` | `"request"`).
+   - CLI command: `rpm homebrew [-default | -upstream | -request]`. When executed without arguments, prints the currently active configuration.
+   - Default setting is `"request"`, prompting user interactively during Cask installation unless configured otherwise.
+2. **Recursive Recipe Layout (`src/recipe.rs`)**:
+   - Updates `load_recipes_from_dir` to recursively scan subdirectories.
+   - Native curated recipes: `recipes/*.toml` (or `~/.rpm/recipes/*.toml`).
+   - Imported Homebrew casks: `recipes/homebrew/cask/*.toml` (or `~/.rpm/recipes/homebrew/cask/*.toml`), reserving `recipes/homebrew/formula/` for future CLI packages.
+3. **Index-Free On-Demand Resolution Waterfall (`rpm install <query>`)**:
+   - When a user runs `rpm install <query>`:
+     1. Checks if recipe is already installed or cached in `~/.rpm/recipes/**/*.toml`.
+     2. If not found, checks Rory's Package Manager upstream GitHub: `raw.githubusercontent.com/rorymiley/rorys-package-manager/master/recipes/<query>.toml`. If 200 OK, downloads directly to `~/.rpm/recipes/<query>.toml` and proceeds to install.
+     3. If not found, checks Homebrew Cask public API: `formulae.brew.sh/api/cask/<query>.json`. If 200 OK, triggers the Dual-Track Homebrew Cask Importer.
+     4. If neither exists (both 404), aborts with a friendly error: `Package '<query>' not found in rpm recipes or Homebrew casks.`
+   - Alias support: Git symlinks in `recipes/` (e.g. `qbt.toml -> qbittorrent.toml`) allow raw GitHub lookups to resolve shorthand queries without an index.
+4. **Dual-Track Homebrew Cask Importer**:
+   - Evaluates `config.toml` setting (or interactive prompt if `track = "request"`):
+     - **Track 1 (`default` / `verified`)**: Tracks Homebrew's JSON API with pre-verified SHA-256 and tested download URL.
+     - **Track 2 (`upstream`)**: Tracks direct developer source (e.g. GitHub releases) with dynamic checksum calculation on download for zero-day updates.
+   - Converts Homebrew metadata into an `rpm` TOML recipe, sets `quarantine_strip = true`, and saves to `~/.rpm/recipes/homebrew/cask/<cask>.toml`.
+   - Can be overridden ad-hoc per command via `--verified` or `--upstream`.
+5. **Streamlined CLI (Removal of `list-all`)**:
+   - Deprecates and removes `rpm list-all` from CLI dispatch and help.
+   - `rpm list` continues listing locally installed and managed packages.
+   - `rpm update` checks updates only for locally installed packages, hitting only their individual ~2 KB endpoints.
+   - `cache.toml` tracks Homebrew-derived apps with identical fields (`managed`, `local_version`, `remote_version`, `download_url`, `sha256`).
 
 #### Future: Native Self-Update & Web Installer
 1. **Native Self-Update (`rpm self-update`)**:
@@ -412,6 +425,24 @@ regex = "(?P<version>[0-9]+(\\.[0-9]+)+)"
   - Defined `recipes/index.toml` architecture for centralized lightweight package metadata, alias mappings, and descriptions.
   - Designed on-demand single recipe fetching via `raw.githubusercontent.com` upon `rpm install <query>`, avoiding GitHub API 60 req/hr rate limits.
   - Updated `GEMINI.md` to reflect the new future scope.
+
+### 2026-10-15
+- **Index-Free On-Demand Resolution & Homebrew Cask Integration (Completed)**:
+  - Replaced bulk and sparse index syncing models with an **Index-Free On-Demand Resolution Waterfall** (`rpm install <query>`), querying local recipes first, then native GitHub raw recipes, and finally the Homebrew Cask public API (`formulae.brew.sh/api/cask/<query>.json`).
+  - Implemented the **Dual-Track Homebrew Cask Importer**:
+    - Track 1 (`default` / `verified`): Homebrew verified SHA-256 and tested download URL.
+    - Track 2 (`upstream`): Direct developer upstream source with dynamic checksum calculation on download for zero-day updates.
+    - Automatic Gatekeeper quarantine stripping (`quarantine_strip = true`) applied to all imported bundles.
+  - Implemented the **Dual-Mode Configuration Engine (`src/config.rs`)**:
+    - Stores user preference for Homebrew track (`track = "request" | "default" | "upstream"`).
+    - Added `rpm homebrew [-default | -upstream | -request]` CLI command.
+    - Added `paths::config_file_path()` in `src/paths.rs` and created initial local dev configuration at `local/config.toml` defaulting to `"request"`.
+  - Implemented **Recursive Recipe Loader** in `src/recipe.rs` scanning `recipes/homebrew/cask/*.toml` with canonical name deduplication.
+  - Enforced strict pre-flight refusal in `cmd_install` protecting unmanaged existing `/Applications` bundles before downloading or prompting.
+  - Removed `rpm list-all` from CLI commands and help text in favor of a lean client model.
+  - Added Git alias symlinks in `recipes/` (`qbt.toml`, `chrome.toml`, `chrome-snapshot.toml`, `libwolf.toml`).
+  - Expanded unit test suite from 25 to 30 tests (all passing).
+
 
 
 

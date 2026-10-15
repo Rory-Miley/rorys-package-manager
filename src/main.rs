@@ -1,5 +1,6 @@
 mod cache;
 mod cli;
+pub mod config;
 mod installer;
 mod local;
 mod network;

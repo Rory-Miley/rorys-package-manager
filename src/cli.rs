@@ -4,6 +4,7 @@
 //! `recipe` / `network` / `version` / `cache` / `local` / `installer`.
 
 use crate::cache::{self, CachedApp, UpdateCache};
+use crate::config;
 use crate::installer;
 use crate::local;
 use crate::network;
@@ -39,11 +40,18 @@ pub fn run(args: &[String]) -> i32 {
             let is_clean = args
                 .iter()
                 .any(|arg| arg == "-c" || arg == "--clean" || arg == "-clean");
+            let track_override = if args.iter().any(|arg| arg == "--upstream" || arg == "-upstream") {
+                Some(config::HomebrewTrack::Upstream)
+            } else if args.iter().any(|arg| arg == "--verified" || arg == "-verified" || arg == "--default" || arg == "-default") {
+                Some(config::HomebrewTrack::Default)
+            } else {
+                None
+            };
             let app = args.iter().skip(2).find(|arg| !arg.starts_with('-'));
             match app {
-                Some(app) => cmd_install(app, is_verbose, is_clean),
+                Some(app) => cmd_install(app, is_verbose, is_clean, track_override),
                 None => {
-                    eprintln!("\x1b[31mUsage:\x1b[0m {} install [-v] [-c] <app>", paths::runner_cmd());
+                    eprintln!("\x1b[31mUsage:\x1b[0m {} install [-v] [-c] [--upstream | --verified] <app>", paths::runner_cmd());
                     1
                 }
             }
@@ -62,22 +70,14 @@ pub fn run(args: &[String]) -> i32 {
             let app = args.iter().skip(2).find(|arg| !arg.starts_with('-'));
             cmd_cleanup(app.map(|s| s.as_str()), is_verbose)
         },
+        "homebrew" => {
+            cmd_homebrew(args)
+        },
         "list" => {
-            let is_all = args.iter().any(|arg| arg == "--all" || arg == "-a" || arg == "all");
             let is_verbose = args
                 .iter()
                 .any(|arg| arg == "-v" || arg == "--verbose" || arg == "-verbose");
-            if is_all {
-                cmd_list_all(is_verbose)
-            } else {
-                cmd_list(is_verbose)
-            }
-        }
-        "list-all" => {
-            let is_verbose = args
-                .iter()
-                .any(|arg| arg == "-v" || arg == "--verbose" || arg == "-verbose");
-            cmd_list_all(is_verbose)
+            cmd_list(is_verbose)
         }
         "help" | "--help" | "-h" => {
             print_help();
@@ -123,11 +123,13 @@ fn print_help() {
 \x1b[1mCommands:\x1b[0m
   update [-v]            Check installed apps against upstream, evaluate versions, and write update cache
   upgrade [-v] [-c]      Download, verify SHA-256, and install pending updates (from cache)
-  install [-v] [-c] <app> Install (or reinstall) a tracked app by name or alias (-c for clean install)
+  install [-v] [-c] [--upstream | --verified] <app>
+                         Install a package on-demand (-c for clean install)
   uninstall <app>        Safely remove a managed app from /Applications
   cleanup [app] [-v]     Remove cached downloads from staging (or for a specific app)
   list [-v]              List installed packages and their versions (use -v or -verbose for details)
-  list-all [-v]          List all available package recipes (use -v or -verbose for details)
+  homebrew [-default | -upstream | -request]
+                         View or set default download verification track for Homebrew casks
   help                   Show this message
 
 \x1b[1mAvailable Recipes:\x1b[0m
@@ -138,7 +140,9 @@ fn print_help() {
   {cmd} update -v
   {cmd} list
   {cmd} list -v
-  {cmd} list-all
+  {cmd} homebrew
+  {cmd} homebrew -upstream
+  {cmd} install vlc
   {cmd} install qbt
   {cmd} install -c qbt
   {cmd} cleanup
@@ -210,7 +214,7 @@ fn cmd_list(verbose: bool) -> i32 {
 
     if installed_recipes.is_empty() {
         println!("\x1b[1;34m==>\x1b[0m No packages currently installed.");
-        println!("    Run \x1b[1m{} list-all\x1b[0m to see available packages to install.", paths::runner_cmd());
+        println!("    Run \x1b[1m{} install <app>\x1b[0m to install a package.", paths::runner_cmd());
         return 0;
     }
 
@@ -228,33 +232,45 @@ fn cmd_list(verbose: bool) -> i32 {
     0
 }
 
-/// Lists all available package recipes and their local installation status.
-fn cmd_list_all(verbose: bool) -> i32 {
-    let recipes = match recipe::load_recipes() {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("\x1b[31mFailed to load recipes: {}\x1b[0m", e);
-            return 1;
-        }
-    };
+/// `rpm homebrew [-default | -upstream | -request]` — view or configure default Homebrew download verification track.
+fn cmd_homebrew(args: &[String]) -> i32 {
+    let mut config = config::Config::load_or_default();
+    let track_arg = args.iter().skip(2).find(|arg| !arg.is_empty());
 
-    println!(
-        "\x1b[1;34m==>\x1b[0m \x1b[1mAvailable Package Recipes ({}):\x1b[0m",
-        recipes.len()
-    );
-    for r in &recipes {
-        let local_ver = local::get_recipe_local_version(r)
-            .unwrap_or_else(|| "Not Installed".to_string());
-        let managed = cache::was_managed(&r.name);
-        if verbose {
-            print_recipe_entry(r, &local_ver, managed);
-        } else if local_ver == "Not Installed" {
-            println!("  • \x1b[1m{}\x1b[0m [\x1b[90mNot Installed\x1b[0m]", r.name);
-        } else {
-            println!("  • \x1b[1m{}\x1b[0m [\x1b[32m{}\x1b[0m]", r.name, local_ver);
+    match track_arg {
+        Some(arg) => {
+            if let Some(track) = config::HomebrewTrack::parse(arg) {
+                config.homebrew.track = track;
+                if let Err(e) = config.save() {
+                    eprintln!("\x1b[31mFailed to save config: {}\x1b[0m", e);
+                    return 1;
+                }
+                println!(
+                    "\x1b[1;34m==>\x1b[0m Homebrew default track set to: \x1b[1;32m{}\x1b[0m",
+                    track.as_str()
+                );
+                0
+            } else {
+                eprintln!(
+                    "\x1b[31mInvalid track option '{}'.\x1b[0m Valid options: default (verified sha), upstream (zero-day), request (prompt on install)",
+                    arg
+                );
+                1
+            }
+        }
+        None => {
+            println!(
+                "\x1b[1;34m==>\x1b[0m Active Homebrew Track: \x1b[1;32m{}\x1b[0m",
+                config.homebrew.track.as_str()
+            );
+            println!("    Available tracks:");
+            println!("      • \x1b[1mdefault\x1b[0m  — Homebrew verified SHA-256 (maximum security)");
+            println!("      • \x1b[1mupstream\x1b[0m — Direct developer release (zero-day updates)");
+            println!("      • \x1b[1mrequest\x1b[0m  — Prompt interactively on each Homebrew cask install");
+            println!("\n    To change track: {} homebrew [-default | -upstream | -request]", paths::runner_cmd());
+            0
         }
     }
-    0
 }
 
 /// `rpm upgrade` — read `local/cache.toml`, download + verify + install pending apps.
@@ -283,8 +299,108 @@ fn cmd_upgrade(verbose: bool, clean: bool) -> i32 {
     }
 }
 
+fn prompt_user_for_track(app_name: &str) -> config::HomebrewTrack {
+    println!("\nSelect verification track for '{}':", app_name);
+    println!("  [1] Homebrew Verified (Recommended)");
+    println!("      • Pre-verified SHA-256 checksum vetted by Homebrew CI");
+    println!("      • Protection against compromised or modified downloads");
+    println!("  [2] Direct Upstream (Zero-Day)");
+    println!("      • Direct from developer releases, checksum computed on download");
+    println!("      • Instant zero-day updates without waiting for Homebrew vetting");
+    print!("Choose [1/2] (default: 1): ");
+    let _ = std::io::stdout().flush();
+
+    let mut input = String::new();
+    if std::io::stdin().read_line(&mut input).is_ok() {
+        let trimmed = input.trim();
+        if trimmed == "2" || trimmed.eq_ignore_ascii_case("upstream") {
+            return config::HomebrewTrack::Upstream;
+        }
+    }
+    config::HomebrewTrack::Default
+}
+
+fn generate_cask_recipe_toml(
+    info: &network::HomebrewCaskInfo,
+    track: config::HomebrewTrack,
+) -> String {
+    let clean_conflicts = info
+        .conflicts
+        .iter()
+        .map(|c| format!("\"{}\"", c))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let conflicts_line = if info.conflicts.is_empty() {
+        String::new()
+    } else {
+        format!("conflicting_applications = [{}]\n", clean_conflicts)
+    };
+
+    let homepage_line = match &info.homepage {
+        Some(hp) if !hp.is_empty() => format!("homepage = \"{}\"\n", hp),
+        _ => String::new(),
+    };
+
+    let desc_line = match &info.desc {
+        Some(d) if !d.is_empty() => format!("description = \"{}\"\n", d.replace('"', "\\\"")),
+        _ => String::new(),
+    };
+
+    match track {
+        config::HomebrewTrack::Default | config::HomebrewTrack::Request => {
+            format!(
+                "name = \"{}\"\naliases = [\"{}\"]\nbundle_name = \"{}\"\n{}{}quarantine_strip = true\n{}\n[source]\ntype = \"homebrew_cask\"\ncask = \"{}\"\n\n[livecheck]\nstrategy = \"homebrew_cask\"\ncask = \"{}\"\n",
+                info.name.replace('"', "\\\""),
+                info.token,
+                info.bundle_name,
+                homepage_line,
+                desc_line,
+                conflicts_line,
+                info.token,
+                info.token
+            )
+        }
+        config::HomebrewTrack::Upstream => {
+            let gh_regex = regex::Regex::new(r"^https://github\.com/([^/]+)/([^/]+)/releases").unwrap();
+            if let Some(caps) = gh_regex.captures(&info.download_url) {
+                let owner = &caps[1];
+                let repo = &caps[2];
+                format!(
+                    "name = \"{}\"\naliases = [\"{}\"]\nbundle_name = \"{}\"\n{}{}quarantine_strip = true\n{}\n[source]\ntype = \"github_release\"\nlocator = \"{}/{}\"\n\n[livecheck]\nstrategy = \"github_latest_release\"\n",
+                    info.name.replace('"', "\\\""),
+                    info.token,
+                    info.bundle_name,
+                    homepage_line,
+                    desc_line,
+                    conflicts_line,
+                    owner,
+                    repo
+                )
+            } else {
+                format!(
+                    "name = \"{}\"\naliases = [\"{}\"]\nbundle_name = \"{}\"\n{}{}quarantine_strip = true\n{}\n[source]\ntype = \"direct_url\"\nurl_template = \"{}\"\n\n[livecheck]\nstrategy = \"homebrew_cask\"\ncask = \"{}\"\n",
+                    info.name.replace('"', "\\\""),
+                    info.token,
+                    info.bundle_name,
+                    homepage_line,
+                    desc_line,
+                    conflicts_line,
+                    info.download_url,
+                    info.token
+                )
+            }
+        }
+    }
+}
+
 /// `rpm install <app>` — fetch latest release and install, then mark managed in cache.
-fn cmd_install(query: &str, verbose: bool, clean: bool) -> i32 {
+fn cmd_install(
+    query: &str,
+    verbose: bool,
+    clean: bool,
+    track_override: Option<config::HomebrewTrack>,
+) -> i32 {
     let recipes = match recipe::load_recipes() {
         Ok(r) => r,
         Err(e) => {
@@ -293,20 +409,138 @@ fn cmd_install(query: &str, verbose: bool, clean: bool) -> i32 {
         }
     };
 
-    let recipe = match recipe::find_recipe(query, &recipes) {
-        Some(r) => r,
-        None => {
-            let available: Vec<&str> = recipes.iter().map(|r| r.name.as_str()).collect();
-            eprintln!(
-                "\x1b[31mUnknown app '{}'.\x1b[0m Available recipes: {}",
-                query,
-                available.join(", ")
+    let resolved_recipe = if let Some(r) = recipe::find_recipe(query, &recipes) {
+        Some(r.clone())
+    } else {
+        if verbose {
+            println!(
+                "\x1b[1;34m==>\x1b[0m '{}' not found locally. Searching upstream catalogs...",
+                query
             );
-            return 1;
+        }
+
+        // 1. Check native GitHub raw
+        let native_opt = match network::fetch_raw_github_recipe(query) {
+            Ok(opt) => opt,
+            Err(e) => {
+                if verbose {
+                    eprintln!("    \x1b[90m(Native upstream check: {})\x1b[0m", e);
+                }
+                None
+            }
+        };
+
+        if let Some(raw_toml) = native_opt {
+            match toml::from_str::<recipe::Recipe>(&raw_toml) {
+                Ok(rec) => {
+                    let dest_dir = paths::recipes_dir();
+                    let _ = std::fs::create_dir_all(&dest_dir);
+                    let target_path = dest_dir.join(format!("{}.toml", query.to_lowercase()));
+                    if let Err(e) = std::fs::write(&target_path, &raw_toml) {
+                        eprintln!("\x1b[31mFailed to save recipe: {}\x1b[0m", e);
+                        return 1;
+                    }
+                    if verbose {
+                        println!("  \x1b[32m✓\x1b[0m Fetched native recipe: {}", rec.name);
+                    }
+                    Some(rec)
+                }
+                Err(e) => {
+                    eprintln!("\x1b[31mFailed to parse remote recipe: {}\x1b[0m", e);
+                    None
+                }
+            }
+        } else {
+            // 2. Check Homebrew Cask API
+            match network::fetch_homebrew_cask_info(query) {
+                Ok(info) => {
+                    println!("\x1b[1;34m==>\x1b[0m Found '{}' in Homebrew Cask catalog.", info.name);
+
+                    // Pre-flight check: strict refusal if target exists and is unmanaged
+                    let clean_bundle = if info.bundle_name.ends_with(".app") {
+                        info.bundle_name.clone()
+                    } else {
+                        format!("{}.app", info.bundle_name)
+                    };
+                    let target = std::path::PathBuf::from(format!("/Applications/{}", clean_bundle));
+                    if target.exists() && !cache::was_managed(&info.name) && !cache::was_managed(&clean_bundle) {
+                        eprintln!(
+                            "\x1b[31mError:\x1b[0m '{}' is already installed at /Applications/{} but is not managed by rpm.\n\
+                             For security and system integrity, rpm will not overwrite applications installed outside this package manager.\n\
+                             To manage '{}' with rpm:\n  \
+                             1. Uninstall or remove '/Applications/{}' (e.g. drag to Trash or run: rm -rf '/Applications/{}')\n  \
+                             2. Reinstall via rpm: {} install {}",
+                            info.name,
+                            clean_bundle,
+                            info.name,
+                            clean_bundle,
+                            clean_bundle,
+                            paths::runner_cmd(),
+                            info.token
+                        );
+                        return 1;
+                    }
+
+                    if info.disabled {
+                        println!(
+                            "  \x1b[33mNotice:\x1b[0m Homebrew cask is disabled ({}: {}). rpm will strip quarantine.",
+                            info.name,
+                            info.disable_reason.as_deref().unwrap_or("fails security check")
+                        );
+                    }
+
+                    let effective_track = track_override.unwrap_or_else(|| {
+                        let cfg = config::Config::load_or_default();
+                        match cfg.homebrew.track {
+                            config::HomebrewTrack::Request => prompt_user_for_track(&info.name),
+                            other => other,
+                        }
+                    });
+
+                    let toml_content = generate_cask_recipe_toml(&info, effective_track);
+                    let cask_dir = paths::recipes_dir().join("homebrew").join("cask");
+                    let _ = std::fs::create_dir_all(&cask_dir);
+                    let recipe_path = cask_dir.join(format!("{}.toml", info.token));
+
+                    if let Err(e) = std::fs::write(&recipe_path, &toml_content) {
+                        eprintln!("\x1b[31mFailed to save generated recipe: {}\x1b[0m", e);
+                        return 1;
+                    }
+
+                    if verbose {
+                        println!(
+                            "  \x1b[32m✓\x1b[0m Generated recipe: {} [track: {}]",
+                            recipe_path.display(),
+                            effective_track.as_str()
+                        );
+                    }
+
+                    match toml::from_str::<recipe::Recipe>(&toml_content) {
+                        Ok(rec) => Some(rec),
+                        Err(e) => {
+                            eprintln!("\x1b[31mFailed to parse generated recipe: {}\x1b[0m", e);
+                            None
+                        }
+                    }
+                }
+                Err(_) => {
+                    eprintln!(
+                        "\x1b[31mError:\x1b[0m Package '{}' not found in rpm recipes or Homebrew casks.",
+                        query
+                    );
+                    return 1;
+                }
+            }
         }
     };
 
-    if let Err(e) = installer::check_conflicting_apps(recipe, &recipes) {
+    let recipe = match resolved_recipe {
+        Some(ref r) => r,
+        None => return 1,
+    };
+
+    let all_recipes = recipe::load_recipes().unwrap_or_default();
+    if let Err(e) = installer::check_conflicting_apps(recipe, &all_recipes) {
         eprintln!("\x1b[31mConflict error:\x1b[0m {}", e);
         return 1;
     }
@@ -433,7 +667,7 @@ fn cmd_update(verbose: bool) -> i32 {
 
     if installed_recipes.is_empty() {
         println!("\x1b[1;34m==>\x1b[0m No installed packages found to check.");
-        println!("    Run \x1b[1m{} list-all\x1b[0m to see available packages to install.", paths::runner_cmd());
+        println!("    Run \x1b[1m{} install <app>\x1b[0m to install a package.", paths::runner_cmd());
         return 0;
     }
 
@@ -451,8 +685,8 @@ fn cmd_update(verbose: bool) -> i32 {
 
         let managed = cache::was_managed(&recipe.name);
 
-        match network::resolve_recipe(recipe) {
-            Ok((remote_version, download_url)) => {
+        match network::resolve_recipe_info(recipe) {
+            Ok((remote_version, download_url, sha256)) => {
                 // If local_version was read without -X (e.g. "156.0.1"), but this app is managed
                 // and remote_version has a revision suffix matching base local_version (e.g. "156.0.1-1"):
                 let effective_local = if managed
@@ -513,7 +747,7 @@ fn cmd_update(verbose: bool) -> i32 {
                     }
 
                     println!("  🔗 \x1b[90m{}\x1b[0m", download_url);
-                    if let Some(ref expected_hash) = recipe.sha256 {
+                    if let Some(ref expected_hash) = sha256 {
                         println!("  🔒 Expected SHA-256: \x1b[90m{}\x1b[0m", expected_hash);
                     }
                 } else {
@@ -547,7 +781,7 @@ fn cmd_update(verbose: bool) -> i32 {
                     download_url,
                     update_available,
                     managed,
-                    sha256: recipe.sha256.clone(),
+                    sha256,
                 });
             }
             Err(e) => {

@@ -49,6 +49,9 @@ pub enum SourceConfig {
         #[serde(default = "default_chromium_channel")]
         channel: String,
     },
+    HomebrewCask {
+        cask: String,
+    },
 }
 
 fn default_chromium_channel() -> String {
@@ -70,6 +73,9 @@ pub enum LivecheckConfig {
     },
     RawUrl {
         url: String,
+    },
+    HomebrewCask {
+        cask: String,
     },
 }
 
@@ -93,7 +99,21 @@ impl Recipe {
     }
 }
 
-/// Loads all recipes from the active recipes directory.
+/// Helper to recursively collect all .toml recipe files within a directory tree.
+fn collect_toml_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_toml_files(&path, files);
+            } else if path.extension().and_then(|s| s.to_str()) == Some("toml") {
+                files.push(path);
+            }
+        }
+    }
+}
+
+/// Loads all recipes from the active recipes directory, including subdirectories.
 pub fn load_recipes() -> Result<Vec<Recipe>, String> {
     load_recipes_from_dir(&paths::recipes_dir())
 }
@@ -105,23 +125,21 @@ pub fn load_recipes_from_dir(dir: &Path) -> Result<Vec<Recipe>, String> {
         return Ok(Vec::new());
     }
 
-    let mut recipes = Vec::new();
-    let entries = fs::read_dir(dir)
-        .map_err(|e| format!("Failed to read recipes directory {}: {}", dir.display(), e))?;
+    let mut toml_files = Vec::new();
+    collect_toml_files(dir, &mut toml_files);
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) == Some("toml") {
-            let content = fs::read_to_string(&path)
-                .map_err(|e| format!("Failed to read recipe file {}: {}", path.display(), e))?;
-            let recipe: Recipe = toml::from_str(&content)
-                .map_err(|e| format!("Failed to parse recipe {}: {}", path.display(), e))?;
-            recipes.push(recipe);
-        }
+    let mut recipes = Vec::new();
+    for path in toml_files {
+        let content = fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read recipe file {}: {}", path.display(), e))?;
+        let recipe: Recipe = toml::from_str(&content)
+            .map_err(|e| format!("Failed to parse recipe {}: {}", path.display(), e))?;
+        recipes.push(recipe);
     }
 
-    // Sort deterministically by canonical name
+    // Sort deterministically by canonical name and deduplicate (e.g. if alias symlinks exist)
     recipes.sort_by(|a, b| a.name.cmp(&b.name));
+    recipes.dedup_by(|a, b| a.name.eq_ignore_ascii_case(&b.name));
     Ok(recipes)
 }
 
@@ -192,6 +210,77 @@ mod tests {
 
         let recipe_b: Recipe = toml::from_str(toml_b).expect("Failed to deserialize recipe");
         assert_eq!(recipe_b.conflicting_applications, vec!["Chromium"]);
+    }
+
+    #[test]
+    fn test_parse_homebrew_cask_recipe() {
+        let toml_str = r#"
+            name = "VLC media player"
+            aliases = ["vlc"]
+            bundle_name = "VLC.app"
+            homepage = "https://www.videolan.org/vlc/"
+            quarantine_strip = true
+
+            [source]
+            type = "homebrew_cask"
+            cask = "vlc"
+
+            [livecheck]
+            strategy = "homebrew_cask"
+            cask = "vlc"
+        "#;
+
+        let recipe: Recipe = toml::from_str(toml_str).expect("Failed to deserialize cask recipe");
+        assert_eq!(recipe.name, "VLC media player");
+        assert!(recipe.matches("vlc"));
+        match recipe.source {
+            SourceConfig::HomebrewCask { cask } => assert_eq!(cask, "vlc"),
+            _ => panic!("Expected HomebrewCask source"),
+        }
+        match recipe.livecheck {
+            LivecheckConfig::HomebrewCask { cask } => assert_eq!(cask, "vlc"),
+            _ => panic!("Expected HomebrewCask livecheck"),
+        }
+    }
+
+    #[test]
+    fn test_recursive_recipe_loading() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sub_cask = tmp.path().join("homebrew").join("cask");
+        fs::create_dir_all(&sub_cask).unwrap();
+
+        let top_file = tmp.path().join("app1.toml");
+        let sub_file = sub_cask.join("app2.toml");
+
+        let toml1 = r#"
+            name = "App One"
+            bundle_name = "AppOne.app"
+            [source]
+            type = "direct_url"
+            url_template = "https://example.com/one.dmg"
+            [livecheck]
+            strategy = "raw_url"
+            url = "https://example.com/version"
+        "#;
+
+        let toml2 = r#"
+            name = "App Two"
+            bundle_name = "AppTwo.app"
+            [source]
+            type = "homebrew_cask"
+            cask = "app2"
+            [livecheck]
+            strategy = "homebrew_cask"
+            cask = "app2"
+        "#;
+
+        fs::write(top_file, toml1).unwrap();
+        fs::write(sub_file, toml2).unwrap();
+
+        let loaded = load_recipes_from_dir(tmp.path()).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].name, "App One");
+        assert_eq!(loaded[1].name, "App Two");
     }
 }
 
