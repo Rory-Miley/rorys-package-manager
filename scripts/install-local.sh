@@ -42,10 +42,10 @@ sudo chown -R "${REAL_USER}:admin" /opt/rpm
 echo -e "\033[1;34m==>\033[0m \033[1mRegistering /opt/rpm/bin in /etc/paths.d/rpm...\033[0m"
 echo "$INSTALL_DIR" | sudo tee "$PATHS_FILE" > /dev/null
 
-echo -e "\033[1;34m==>\033[0m \033[1mSeeding recipes to $USER_RECIPES_DIR...\033[0m"
-sudo mkdir -p "$USER_RECIPES_DIR"
-if [ -d "recipes" ]; then
-    sudo cp recipes/*.toml "$USER_RECIPES_DIR/"
+echo -e "\033[1;34m==>\033[0m \033[1mSeeding recipes to $USER_RECIPES_DIR/rpm...\033[0m"
+sudo mkdir -p "$USER_RECIPES_DIR/rpm"
+if [ -d "recipes/rpm" ]; then
+    sudo cp -R recipes/rpm/*.toml "$USER_RECIPES_DIR/rpm/"
 fi
 
 # Ensure user owns ~/.rpm and download cache

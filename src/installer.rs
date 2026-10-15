@@ -395,6 +395,7 @@ pub fn uninstall_app(name: &str) -> Result<(), String> {
             "\x1b[1;34m==>\x1b[0m Removing \x1b[1m{}\x1b[0m...",
             target.display()
         );
+        local::unregister_app_from_system(&target);
         fs::remove_dir_all(&target).map_err(|e| {
             format!(
                 "Failed to remove {}: {}\n(You may need to quit the app or check permissions.)",
@@ -989,6 +990,24 @@ fn ditto_copy(from: &Path, to: &Path) -> Result<(), String> {
     }
 }
 
+/// Relocates a directory hierarchy via fast filesystem rename (O(1) on same APFS container),
+/// falling back to ditto copy + source cleanup if across filesystem boundaries.
+fn move_or_copy_bundle(from: &Path, to: &Path) -> Result<(), String> {
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create parent: {}", e))?;
+    }
+
+    match fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            // Fallback for cross-device moves
+            ditto_copy(from, to)?;
+            let _ = fs::remove_dir_all(from);
+            Ok(())
+        }
+    }
+}
+
 /// Atomically installs the staged bundle to `/Applications/<bundle_name>`, protecting running apps.
 fn install_app_bundle_atomic(
     staged_app: &Path,
@@ -1027,7 +1046,7 @@ fn install_app_bundle_atomic(
         }
     }
 
-    // 2. Strip quarantine on the staged directory BEFORE copying to /Applications
+    // 2. Strip quarantine on the staged directory BEFORE moving
     if quarantine_strip {
         if verbose {
             println!("    🛡️  Stripping Apple Gatekeeper quarantine attribute...");
@@ -1052,25 +1071,39 @@ fn install_app_bundle_atomic(
         None
     };
 
-    // 4. Install staged bundle
-    let copy_result = ditto_copy(staged_app, &target);
+    // 4. Install staged bundle via fast atomic move (O(1) filesystem relocation)
+    let move_result = move_or_copy_bundle(staged_app, &target);
 
-    match copy_result {
+    match move_result {
         Ok(()) => {
             // Verify bundle structure
             if let Err(e) = local::validate_app_bundle(&target) {
+                let _ = fs::remove_dir_all(&target);
                 if let Some(ref backup) = backup_path {
                     let _ = fs::rename(backup, &target);
                 }
                 return Err(format!("Installed bundle validation failed: {}", e));
             }
 
-            // Also strip target in place if requested
+            // 5. Ensure quarantine is cleanly stripped from the final /Applications bundle
             if quarantine_strip {
+                if verbose {
+                    println!("    🛡️  Stripping Apple Gatekeeper quarantine attribute on target...");
+                }
                 let _ = local::remove_quarantine(&target);
             }
 
-            // Cleanup backup
+            // 6. Register with macOS Launch Services and Spotlight so app appears in Spotlight & Launchpad immediately
+            if verbose {
+                println!("    🔍 Registering application with Launch Services & Spotlight...");
+            }
+            if let Err(e) = local::register_app_with_system(&target) {
+                if verbose {
+                    eprintln!("    ⚠️  Launch Services registration notice: {}", e);
+                }
+            }
+
+            // 7. Cleanup backup
             if let Some(ref backup) = backup_path {
                 let _ = fs::remove_dir_all(backup);
             }
@@ -1221,5 +1254,28 @@ mod tests {
         assert!(file_hidden.exists());
 
         let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_move_or_copy_bundle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("Source.app");
+        let dst = tmp.path().join("Destination.app");
+
+        fs::create_dir_all(src.join("Contents")).unwrap();
+        fs::write(src.join("Contents/test.txt"), "hello").unwrap();
+
+        assert!(src.exists());
+        assert!(!dst.exists());
+
+        move_or_copy_bundle(&src, &dst).unwrap();
+
+        assert!(!src.exists());
+        assert!(dst.exists());
+        assert!(dst.join("Contents/test.txt").exists());
+        assert_eq!(
+            fs::read_to_string(dst.join("Contents/test.txt")).unwrap(),
+            "hello"
+        );
     }
 }

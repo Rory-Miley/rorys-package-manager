@@ -248,3 +248,89 @@ pub fn validate_app_bundle(bundle_path: &Path) -> Result<(), String> {
 
     Ok(())
 }
+
+/// Registers an installed .app bundle with macOS system services (Launch Services & Spotlight).
+/// 1. Updates modification time via `touch` to refresh FSEvents.
+/// 2. Registers with Launch Services via `lsregister -f` so it immediately appears in Launchpad and "Open With".
+/// 3. Re-indexes metadata with `mdimport` so it immediately appears in Spotlight search.
+pub fn register_app_with_system(bundle_path: &Path) -> Result<(), String> {
+    if !bundle_path.exists() {
+        return Err(format!(
+            "Cannot register non-existent path: {}",
+            bundle_path.display()
+        ));
+    }
+
+    let path_str = bundle_path.to_str().unwrap_or_default();
+
+    // 1. Touch the bundle to refresh modification time for FSEvents
+    let _ = Command::new("touch").arg(path_str).status();
+
+    // 2. Register with Launch Services (lsregister)
+    let lsregister_paths = [
+        "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
+        "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister",
+    ];
+
+    for lsr in &lsregister_paths {
+        if Path::new(lsr).exists() {
+            let _ = Command::new(lsr).args(["-f", path_str]).status();
+            break;
+        }
+    }
+
+    // 3. Force Spotlight indexing (mdimport)
+    let _ = Command::new("mdimport").arg(path_str).status();
+
+    Ok(())
+}
+
+/// Unregisters a removed .app bundle from Launch Services.
+pub fn unregister_app_from_system(bundle_path: &Path) {
+    let path_str = bundle_path.to_str().unwrap_or_default();
+    let lsregister_paths = [
+        "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
+        "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister",
+    ];
+
+    for lsr in &lsregister_paths {
+        if Path::new(lsr).exists() {
+            let _ = Command::new(lsr).args(["-u", path_str]).status();
+            break;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn test_validate_app_bundle_structure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = tmp.path().join("Sample.app");
+        assert!(validate_app_bundle(&app).is_err());
+
+        fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+        assert!(validate_app_bundle(&app).is_err());
+
+        fs::write(app.join("Contents/Info.plist"), "fake plist").unwrap();
+        assert!(validate_app_bundle(&app).is_ok());
+    }
+
+    #[test]
+    fn test_register_app_with_system_dummy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dummy = tmp.path().join("TestApp.app");
+        fs::create_dir_all(&dummy).unwrap();
+
+        // Calling register on a real directory should succeed without errors
+        let res = register_app_with_system(&dummy);
+        assert!(res.is_ok());
+
+        // Calling register on a non-existent directory should return an error
+        let missing = tmp.path().join("Missing.app");
+        assert!(register_app_with_system(&missing).is_err());
+    }
+}

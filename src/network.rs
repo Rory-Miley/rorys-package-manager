@@ -772,7 +772,7 @@ pub fn fetch_homebrew_cask_info(cask: &str) -> Result<HomebrewCaskInfo, String> 
 pub fn fetch_raw_github_recipe(query: &str) -> Result<Option<String>, String> {
     let clean = query.trim().to_lowercase();
     let url = format!(
-        "https://raw.githubusercontent.com/rorymiley/rorys-package-manager/master/recipes/{}.toml",
+        "https://raw.githubusercontent.com/rorymiley/rorys-package-manager/master/recipes/rpm/{}.toml",
         clean
     );
     let client = build_client()?;

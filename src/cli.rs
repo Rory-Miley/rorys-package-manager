@@ -433,7 +433,7 @@ fn cmd_install(
         if let Some(raw_toml) = native_opt {
             match toml::from_str::<recipe::Recipe>(&raw_toml) {
                 Ok(rec) => {
-                    let dest_dir = paths::recipes_dir();
+                    let dest_dir = paths::recipes_dir().join("rpm");
                     let _ = std::fs::create_dir_all(&dest_dir);
                     let target_path = dest_dir.join(format!("{}.toml", query.to_lowercase()));
                     if let Err(e) = std::fs::write(&target_path, &raw_toml) {

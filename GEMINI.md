@@ -92,15 +92,16 @@ To eliminate catalog disk bloat, avoid slow bulk recipe synchronizations, and di
    - Default setting is `"request"`, prompting user interactively during Cask installation unless configured otherwise.
 2. **Recursive Recipe Layout (`src/recipe.rs`)**:
    - Updates `load_recipes_from_dir` to recursively scan subdirectories.
-   - Native curated recipes: `recipes/*.toml` (or `~/.rpm/recipes/*.toml`).
+   - Native curated recipes: `recipes/rpm/*.toml` (or `~/.rpm/recipes/rpm/*.toml`).
    - Imported Homebrew casks: `recipes/homebrew/cask/*.toml` (or `~/.rpm/recipes/homebrew/cask/*.toml`), reserving `recipes/homebrew/formula/` for future CLI packages.
+   - Subdirectory separation ensures updating native `rpm` recipes never overwrites or interferes with user's locally imported Homebrew casks.
 3. **Index-Free On-Demand Resolution Waterfall (`rpm install <query>`)**:
    - When a user runs `rpm install <query>`:
      1. Checks if recipe is already installed or cached in `~/.rpm/recipes/**/*.toml`.
-     2. If not found, checks Rory's Package Manager upstream GitHub: `raw.githubusercontent.com/rorymiley/rorys-package-manager/master/recipes/<query>.toml`. If 200 OK, downloads directly to `~/.rpm/recipes/<query>.toml` and proceeds to install.
+     2. If not found, checks Rory's Package Manager upstream GitHub: `raw.githubusercontent.com/rorymiley/rorys-package-manager/master/recipes/rpm/<query>.toml`. If 200 OK, downloads directly to `~/.rpm/recipes/rpm/<query>.toml` and proceeds to install.
      3. If not found, checks Homebrew Cask public API: `formulae.brew.sh/api/cask/<query>.json`. If 200 OK, triggers the Dual-Track Homebrew Cask Importer.
      4. If neither exists (both 404), aborts with a friendly error: `Package '<query>' not found in rpm recipes or Homebrew casks.`
-   - Alias support: Git symlinks in `recipes/` (e.g. `qbt.toml -> qbittorrent.toml`) allow raw GitHub lookups to resolve shorthand queries without an index.
+   - Alias support: Git symlinks in `recipes/rpm/` (e.g. `qbt.toml -> qbittorrent.toml`) allow raw GitHub lookups to resolve shorthand queries without an index.
 4. **Dual-Track Homebrew Cask Importer**:
    - Evaluates `config.toml` setting (or interactive prompt if `track = "request"`):
      - **Track 1 (`default` / `verified`)**: Tracks Homebrew's JSON API with pre-verified SHA-256 and tested download URL.
@@ -126,7 +127,7 @@ To eliminate catalog disk bloat, avoid slow bulk recipe synchronizations, and di
 
 ## How to Add New Packages (TOML Recipe Guide)
 
-Package recipes live in the `recipes/` directory as individual TOML files (`recipes/<app_name>.toml`). Adding a new package requires **zero Rust recompilation**.
+Package recipes live in the `recipes/rpm/` directory as individual TOML files (`recipes/rpm/<app_name>.toml`). Adding a new package requires **zero Rust recompilation**.
 
 ### Recipe TOML Schema
 
@@ -278,6 +279,8 @@ regex = "(?P<version>[0-9]+(\\.[0-9]+)+)"
 - Graceful shutdown requests via AppleScript (`osascript`).
 - Structural bundle validation (`validate_app_bundle` checking `Contents/Info.plist` and `Contents/MacOS`).
 - Path-based quarantine removal (`xattr -dr com.apple.quarantine`).
+- System application registration (`register_app_with_system`): executes `touch` (mtime refresh for FSEvents), `lsregister -f` (Launch Services force-registration), and `mdimport` (Spotlight metadata indexer), ensuring newly installed applications immediately appear in Launchpad, Dock, and Spotlight search.
+- System application unregistration (`unregister_app_from_system`): executes `lsregister -u` to deregister removed bundles from Launch Services upon `rpm uninstall`.
 
 ### 6. Installer Engine — `src/installer.rs`
 - Archive extractors:
@@ -298,10 +301,12 @@ regex = "(?P<version>[0-9]+(\\.[0-9]+)+)"
 - **Atomic Swap Protocol**:
   1. Detects running app and warns/prompts.
   2. Renames existing `/Applications/<bundle_name>` to `.rpm-backup-<timestamp>`.
-  3. Strips quarantine while still staged.
-  4. Copies staged files to `/Applications/<bundle_name>`.
-  5. On success: deletes backup.
-  6. On failure: restores backup immediately (rollback).
+  3. Strips quarantine on the staged directory.
+  4. Relocates staged bundle into `/Applications/<bundle_name>` via fast atomic filesystem move (`fs::rename`, $O(1)$) with automatic fallback to copy if cross-device (`EXDEV`).
+  5. Strips quarantine on the installed `/Applications/<bundle_name>` bundle.
+  6. Registers bundle with Launch Services and Spotlight (`register_app_with_system`).
+  7. On success: deletes backup.
+  8. On failure: restores backup immediately (rollback).
 
 ### 7. Update Cache — `src/cache.rs`
 - Manages `local/cache.toml`.
@@ -442,7 +447,14 @@ regex = "(?P<version>[0-9]+(\\.[0-9]+)+)"
   - Removed `rpm list-all` from CLI commands and help text in favor of a lean client model.
   - Added Git alias symlinks in `recipes/` (`qbt.toml`, `chrome.toml`, `chrome-snapshot.toml`, `libwolf.toml`).
   - Expanded unit test suite from 25 to 30 tests (all passing).
-
-
-
-
+  - Bumped version to `0.4.0` in `Cargo.toml` and git tagged `0.4.0`.
+- **Fast Move-Based Relocation & Instant Spotlight/Launch Services Registration**:
+  - Replaced slow recursive `ditto` bundle copy with fast atomic filesystem move (`fs::rename`, $O(1)$) from staging into `/Applications`, eliminating redundant SSD writes on APFS with automatic fallback to copy if cross-device (`EXDEV`).
+  - Added two-phase Gatekeeper quarantine stripping: stripped on staged bundle and re-stripped on the destination `/Applications/<bundle>.app` after relocation.
+  - Implemented `local::register_app_with_system` executing `touch` (mtime refresh for FSEvents), `lsregister -f` (Launch Services force-registration), and `mdimport` (Spotlight indexer) to ensure newly installed applications immediately appear in Spotlight and Launchpad/Dock without opening Finder.
+  - Implemented `local::unregister_app_from_system` calling `lsregister -u` to deregister removed applications during `rpm uninstall`.
+  - Expanded unit test suite to 33 tests (all passing).
+- **Native Recipe Directory Reorganization (`recipes/rpm/`)**:
+  - Moved native curated recipes and alias symlinks into `recipes/rpm/` to strictly separate them from machine-local imported Homebrew casks (`recipes/homebrew/cask/`), preventing updates or syncs from overwriting user-imported casks.
+  - Updated raw GitHub upstream recipe URL in `src/network.rs` (`recipes/rpm/{}.toml`) and `cmd_install` in `src/cli.rs`.
+  - Updated `scripts/install-local.sh` to seed `recipes/rpm/*.toml` to `~/.rpm/recipes/rpm/`.
