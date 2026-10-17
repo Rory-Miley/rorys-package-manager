@@ -212,6 +212,18 @@ For the complete recipe schema and livecheck options, see [GEMINI.md](GEMINI.md)
 
 ---
 
+## Homebrew Attribution & Third-Party Disclaimers
+
+`rpm` integrates with the public **[Homebrew Formulae & Cask API](https://formulae.brew.sh/)** (`formulae.brew.sh/api/cask/<token>.json`) on demand to resolve package metadata, download URLs, and checksums for macOS casks.
+
+- **Homebrew Cask & API Attribution**: Package metadata retrieved via the Homebrew API originates from **[Homebrew/homebrew-cask](https://github.com/Homebrew/homebrew-cask)** and **[Homebrew/formulae.brew.sh](https://github.com/Homebrew/formulae.brew.sh)**, both of which are licensed under the **[BSD 2-Clause "Simplified" License](https://github.com/Homebrew/homebrew-cask/blob/HEAD/LICENSE.txt)**. Full credit goes to the Homebrew maintainers and contributors for curating and maintaining the Cask ecosystem.
+- **No Affiliation**: `rpm` (Rory's Package Manager) is an independent project and is not affiliated with, endorsed by, or maintained by the Homebrew project.
+- **Third-Party Software Licenses**: `rpm` is strictly a package manager utility and recipe resolver. Installing an application via `rpm` (whether through a native `rpm` recipe or a Homebrew cask) downloads software directly from the original vendor's upstream servers. Neither `rpm` nor Homebrew grants any license rights to those third-party binaries—your use of any installed application is governed entirely by that software vendor's respective license or End-User License Agreement (EULA).
+
+---
+
 ## License
 
-MIT
+Licensed under the **[BSD 2-Clause "Simplified" License](LICENSE)** — Copyright (c) 2026, Rory Miley.
+
+
