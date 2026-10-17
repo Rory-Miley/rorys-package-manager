@@ -1,5 +1,10 @@
 # Rory's Package Manager (`rpm`) for macOS
 
+![Version (Beta)](https://img.shields.io/badge/dynamic/toml?url=https%3A%2F%2Fraw.githubusercontent.com%2FRory-Miley%2Frorys-package-manager%2Fmaster%2FCargo.toml&query=%24.package.version&prefix=v&suffix=%20(beta)&label=version&color=orange)
+
+> [!WARNING]
+> **Beta Software Disclaimer**: `rpm` is currently in active **beta** (current version: **`v0.4.3`**, tracked in [`Cargo.toml`](Cargo.toml)). While core safety guards—such as atomic bundle swaps, automatic rollback, and unmanaged app protection—are in place, features and CLI behavior may still evolve before `v1.0.0`.
+
 NOT TO BE CONFUSED WITH "red hat package manager (rpm) for linux", it is annoying and unfortunate that they have the same name as me, but I don't use Fedora (Arch obviously) and this package manager is for macOS. I will consider changing the name... never.
 
 A fast, lightweight, and safe macOS CLI package manager written in Rust, designed for managing, updating, and installing unsigned and custom macOS software. In addition, it strips Apple's "quarantine" attribute and automatically registers applications with Spotlight and Launchpad.
