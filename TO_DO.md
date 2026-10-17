@@ -27,22 +27,30 @@ This file tracks planned features, enhancements, and roadmap items for `rpm`. Wo
     - Discover and present an enumerated list of all currently Homebrew-managed casks and their installed versions.
     - Provide interactive selection prompt allowing the user to select specific casks (e.g., `1, 3-5`), select all (`a` / `all`), or cancel.
 
+- [ ] **Installation Progress Bar (`src/progress.rs` & `src/installer.rs`)**
+  - Add a dedicated terminal progress bar for the archive extraction and `.app` bundle installation phase.
+  - Match the exact layout, dynamic terminal width scaling, speed, and ETA metrics of the existing download progress bar, but styled in **green** instead of orange to visually distinguish the installation step from downloading.
+
 ---
 
 ## Medium Priority
 
-- [ ] **Native Self-Update (`rpm self-update`)**
-  - Query GitHub Releases for new `rpm` releases.
-  - Download binary, verify SHA-256 digest, and atomically replace the active executable at `/opt/rpm/bin/rpm` (or `~/.rpm/bin/rpm`).
-  - Sync native recipes (`recipes/rpm/`) alongside binary update.
-  - Display pip/brew-style banner during `rpm update` when a newer version of `rpm` itself is detected upstream.
+- [ ] **Approved Binary Version Control & Pre-Built Repository Binaries**
+  - Maintain version-controlled, approved `rpm` release binaries (and SHA-256 digests) inside a dedicated repository directory so users can install a known-good binary directly from the git repo without compiling from source (`cargo`).
+  - Pair directly with the `install.sh` web installer and `rpm self-update` workflows to pull and verify approved binaries seamlessly.
 
 - [ ] **One-Liner Web Installer (`install.sh`)**
   - Install command: `curl -fsSL https://raw.githubusercontent.com/rorymiley/rorys-package-manager/master/install.sh | sh`
   - Detect macOS architecture (`arm64` Apple Silicon vs `x86_64` Intel).
-  - Download latest release binary from GitHub releases.
+  - Fetch the latest approved binary from the repository's versioned binary directory (or GitHub Releases) and verify its SHA-256 digest.
   - Set up `~/.rpm/` persistent layout (`~/.rpm/recipes/rpm/`, `~/.rpm/cache.toml`, `~/.rpm/config.toml`).
   - Configure system `$PATH` via `/etc/paths.d/rpm` or shell profile fallback (`~/.zshrc`).
+
+- [ ] **Native Self-Update (`rpm self-update`)**
+  - Query upstream for new approved `rpm` binary versions.
+  - Download binary, verify SHA-256 digest, and atomically replace the active executable at `/opt/rpm/bin/rpm` (or `~/.rpm/bin/rpm`).
+  - Sync native recipes (`recipes/rpm/`) alongside binary update.
+  - Display pip/brew-style banner during `rpm update` when a newer version of `rpm` itself is detected upstream.
 
 ---
 
