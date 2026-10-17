@@ -1,6 +1,6 @@
 # Rory's Package Manager (`rpm`) for macOS
 
-![Version (Beta)](https://img.shields.io/badge/dynamic/toml?url=https%3A%2F%2Fraw.githubusercontent.com%2FRory-Miley%2Frorys-package-manager%2Fmaster%2FCargo.toml&query=%24.package.version&prefix=v&suffix=%20label=version&color=orange)
+![Version (Beta)](https://img.shields.io/badge/dynamic/toml?url=https%3A%2F%2Fraw.githubusercontent.com%2FRory-Miley%2Frorys-package-manager%2Fmaster%2FCargo.toml&query=%24.package.version&prefix=v&label=version&color=orange)
 
 > [!WARNING]
 > **Beta Software Disclaimer**: `rpm` is currently in active **beta** (current version tracked in [`Cargo.toml`](Cargo.toml)). While core safety guards such as atomic bundle swaps, automatic rollback, and unmanaged app protection—are in place, features and CLI behavior may still evolve before `v1.0.0`.
@@ -12,6 +12,8 @@ A fast, lightweight, and safe macOS CLI package manager written in Rust, designe
 This package manager utlises custom recipes for apps that are not maintained by homebrew as well as hooking into the existing api from homebrew to allow the install of any casks from their repo. To do this the .json files are converted to .toml on the fly and stored locally on your device.
 
 Currently, only casks are supported from homebrew. Non GUI apps will be supported at a later date.
+
+![rpm download screen](images/download-screen.png)
 
 ---
 
