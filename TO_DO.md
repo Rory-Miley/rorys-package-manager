@@ -31,6 +31,11 @@ This file tracks planned features, enhancements, and roadmap items for `rpm`. Wo
   - Add a dedicated terminal progress bar for the archive extraction and `.app` bundle installation phase.
   - Match the exact layout, dynamic terminal width scaling, speed, and ETA metrics of the existing download progress bar, but styled in **green** instead of orange to visually distinguish the installation step from downloading.
 
+- [ ] **Modernise `README.md` & Add Operation Demo GIF**
+  - Restructure `README.md` to present core app functionality and CLI usage first.
+  - Remove feature section bloat for a cleaner, more concise layout.
+  - Record and embed an animated GIF demonstrating `rpm` in operation.
+
 ---
 
 ## Medium Priority
