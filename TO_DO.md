@@ -31,12 +31,12 @@ This file tracks planned features, enhancements, and roadmap items for `rpm`. Wo
 
 - [ ] **Approved Binary Version Control & Pre-Built Repository Binaries**
   - Maintain version-controlled, approved `rpm` release binaries (and SHA-256 digests) inside a dedicated repository directory so users can install a known-good binary directly from the git repo without compiling from source (`cargo`).
+  - **Target Specification**: Compile an **Apple Silicon (`arm64` / `aarch64-apple-darwin`) only** binary with `MACOSX_DEPLOYMENT_TARGET=12.0` (supporting macOS 12.0 Monterey and newer across M1/M2/M3/M4+ chips with modern `LC_DYLD_CHAINED_FIXUPS` Mach-O headers). Intel (`x86_64`) users can compile from source via `./scripts/install-local.sh` (`cargo`).
   - Pair directly with the `install.sh` web installer and `rpm self-update` workflows to pull and verify approved binaries seamlessly.
 
 - [ ] **One-Liner Web Installer (`install.sh`)**
   - Install command: `curl -fsSL https://raw.githubusercontent.com/rorymiley/rorys-package-manager/master/install.sh | sh`
-  - Detect macOS architecture (`arm64` Apple Silicon vs `x86_64` Intel).
-  - Fetch the latest approved binary from the repository's versioned binary directory (or GitHub Releases) and verify its SHA-256 digest.
+  - Detect macOS architecture: on `arm64` (Apple Silicon, macOS 12.0+), fetch the pre-built approved binary and verify its SHA-256 digest; on `x86_64` (Intel), instruct the user to build from source (or fall back to `cargo build --release` if Rust is installed).
   - Set up `~/.rpm/` persistent layout (`~/.rpm/recipes/rpm/`, `~/.rpm/cache.toml`, `~/.rpm/config.toml`).
   - Configure system `$PATH` via `/etc/paths.d/rpm` or shell profile fallback (`~/.zshrc`).
 
