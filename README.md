@@ -39,7 +39,7 @@ Tested and verified on:
 - **Gatekeeper Quarantine Stripping**: Automatically strips Apple's `com.apple.quarantine` extended attribute on unsigned apps, with a per-package `quarantine_strip` toggle.
 - **Package Conflict & Compatibility Protection**: Prevents installing incompatible or mutually exclusive applications (e.g. stable `Chromium` vs bleeding-edge `Chromium Snapshot`) via bidirectional `conflicting_applications` recipe rules.
 - **Unmanaged Application Protection (Homebrew-Inspired)**: Refuses to overwrite or automatically update existing applications in `/Applications` that were not installed through `rpm`.
-- **Pip-Style Dynamic Progress Bar**: Real-time terminal progress bar featuring download speed (EMA smoothed), downloaded/total MB counter, and remaining ETA that dynamically scales with terminal width.
+- **Two-Phase Connected Tree Pipeline & Dual Progress Bars**: Supports installing or upgrading multiple packages at once (`rpm install <app1> <app2> ...`), downloading and verifying all packages first (orange progress bar) before extracting and installing all `.app` bundles (slate-cyan progress bar) inside a connected `├─` / `│` / `└─` tree that dynamically scales and redraws on terminal window resize.
 - **Dual-Mode Engine**: Operates seamlessly as an installed system binary (`/opt/rpm/bin/rpm`) or in local repository development mode (`cargo run --`).
 
 ---
@@ -101,12 +101,11 @@ rpm upgrade -c
 ```
 
 ### 3. Install Applications (`install`)
-Install an application by its canonical name, alias, or Homebrew cask token:
+Install one or more applications by canonical name, alias, or Homebrew cask token (multiple packages are downloaded first, then installed in a connected tree pipeline):
 ```sh
 rpm install qbt
 rpm install chromium
-rpm install librewolf
-rpm install vlc
+rpm install librewolf qbt vlc
 ```
 
 #### Track Selection for Homebrew Casks:
