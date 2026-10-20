@@ -40,9 +40,14 @@ pub fn run(args: &[String]) -> i32 {
             let is_clean = args
                 .iter()
                 .any(|arg| arg == "-c" || arg == "--clean" || arg == "-clean");
-            let track_override = if args.iter().any(|arg| arg == "--upstream" || arg == "-upstream") {
+            let track_override = if args
+                .iter()
+                .any(|arg| arg == "--upstream" || arg == "-upstream")
+            {
                 Some(config::HomebrewTrack::Upstream)
-            } else if args.iter().any(|arg| arg == "--verified" || arg == "-verified" || arg == "--default" || arg == "-default") {
+            } else if args.iter().any(|arg| {
+                arg == "--verified" || arg == "-verified" || arg == "--default" || arg == "-default"
+            }) {
                 Some(config::HomebrewTrack::Default)
             } else {
                 None
@@ -62,24 +67,25 @@ pub fn run(args: &[String]) -> i32 {
             } else {
                 cmd_install(&apps, is_verbose, is_clean, track_override)
             }
-        },
-        "uninstall" => match args.get(2) {
+        }
+        "uninstall" | "-uninstall" | "--uninstall" => match args.get(2) {
             Some(app) => cmd_uninstall(app),
             None => {
-                eprintln!("\x1b[31mUsage:\x1b[0m {} uninstall <app>", paths::runner_cmd());
+                eprintln!(
+                    "\x1b[31mUsage:\x1b[0m {} uninstall <app>",
+                    paths::runner_cmd()
+                );
                 1
             }
         },
-        "cleanup" | "clean" => {
+        "cleanup" | "clean" | "autoclean" => {
             let is_verbose = args
                 .iter()
                 .any(|arg| arg == "-v" || arg == "--verbose" || arg == "-verbose");
             let app = args.iter().skip(2).find(|arg| !arg.starts_with('-'));
             cmd_cleanup(app.map(|s| s.as_str()), is_verbose)
-        },
-        "homebrew" => {
-            cmd_homebrew(args)
-        },
+        }
+        "homebrew" => cmd_homebrew(args),
         "list" | "-list" | "--list" => {
             let is_verbose = args
                 .iter()
@@ -119,7 +125,11 @@ fn print_help() {
     };
 
     let cmd = paths::runner_cmd();
-    let mode_str = if paths::is_dev_mode() { " [dev mode]" } else { "" };
+    let mode_str = if paths::is_dev_mode() {
+        " [dev mode]"
+    } else {
+        ""
+    };
 
     println!(
         "\x1b[1mrorys-package-manager\x1b[0m (v{version}{mode_str}) — unsigned macOS app package manager
@@ -224,7 +234,10 @@ fn cmd_list(verbose: bool) -> i32 {
 
     if installed_recipes.is_empty() {
         println!("\x1b[1;34m==>\x1b[0m No packages currently installed.");
-        println!("    Run \x1b[1m{} install <app>\x1b[0m to install a package.", paths::runner_cmd());
+        println!(
+            "    Run \x1b[1m{} install <app>\x1b[0m to install a package.",
+            paths::runner_cmd()
+        );
         return 0;
     }
 
@@ -236,7 +249,10 @@ fn cmd_list(verbose: bool) -> i32 {
         if verbose {
             print_recipe_entry(r, local_ver, *managed);
         } else {
-            println!("  • \x1b[1m{}\x1b[0m [\x1b[32m{}\x1b[0m]", r.name, local_ver);
+            println!(
+                "  • \x1b[1m{}\x1b[0m [\x1b[32m{}\x1b[0m]",
+                r.name, local_ver
+            );
         }
     }
     0
@@ -274,10 +290,19 @@ fn cmd_homebrew(args: &[String]) -> i32 {
                 config.homebrew.track.as_str()
             );
             println!("    Available tracks:");
-            println!("      • \x1b[1mdefault\x1b[0m  — Homebrew verified SHA-256 (maximum security)");
-            println!("      • \x1b[1mupstream\x1b[0m — Direct developer release (zero-day updates)");
-            println!("      • \x1b[1mrequest\x1b[0m  — Prompt interactively on each Homebrew cask install");
-            println!("\n    To change track: {} homebrew [-default | -upstream | -request]", paths::runner_cmd());
+            println!(
+                "      • \x1b[1mdefault\x1b[0m  — Homebrew verified SHA-256 (maximum security)"
+            );
+            println!(
+                "      • \x1b[1mupstream\x1b[0m — Direct developer release (zero-day updates)"
+            );
+            println!(
+                "      • \x1b[1mrequest\x1b[0m  — Prompt interactively on each Homebrew cask install"
+            );
+            println!(
+                "\n    To change track: {} homebrew [-default | -upstream | -request]",
+                paths::runner_cmd()
+            );
             0
         }
     }
@@ -364,7 +389,8 @@ fn generate_cask_recipe_toml(
             )
         }
         config::HomebrewTrack::Upstream => {
-            let gh_regex = regex::Regex::new(r"^https://github\.com/([^/]+)/([^/]+)/releases").unwrap();
+            let gh_regex =
+                regex::Regex::new(r"^https://github\.com/([^/]+)/([^/]+)/releases").unwrap();
             if let Some(caps) = gh_regex.captures(&info.download_url) {
                 let owner = &caps[1];
                 let repo = &caps[2];
@@ -495,7 +521,10 @@ fn resolve_single_query(
         match network::fetch_homebrew_cask_info(lookup_token) {
             Ok(info) => {
                 if verbose {
-                    println!("\x1b[1;34m==>\x1b[0m Found '{}' in Homebrew Cask catalog.", info.name);
+                    println!(
+                        "\x1b[1;34m==>\x1b[0m Found '{}' in Homebrew Cask catalog.",
+                        info.name
+                    );
                 }
 
                 // Pre-flight check: strict refusal if target exists and is unmanaged
@@ -530,7 +559,9 @@ fn resolve_single_query(
                     println!(
                         "  \x1b[33mNotice:\x1b[0m Homebrew cask is disabled ({}: {}). rpm will strip quarantine.",
                         info.name,
-                        info.disable_reason.as_deref().unwrap_or("fails security check")
+                        info.disable_reason
+                            .as_deref()
+                            .unwrap_or("fails security check")
                     );
                 }
 
@@ -704,8 +735,8 @@ fn cmd_install(
             }
         };
 
-        let local_version = local::get_recipe_local_version(&recipe)
-            .unwrap_or_else(|| "Not Installed".to_string());
+        let local_version =
+            local::get_recipe_local_version(&recipe).unwrap_or_else(|| "Not Installed".to_string());
 
         let comparison = version::compare(&local_version, &remote_version);
         if comparison == VersionComparison::UpToDate && is_managed && !clean {
@@ -856,7 +887,10 @@ fn cmd_update(verbose: bool) -> i32 {
                                     "{}   \x1b[90mSkipping updates. To manage with rpm, uninstall it from /Applications and run '{} install {}'.\x1b[0m",
                                     detail_indent,
                                     paths::runner_cmd(),
-                                    recipe.aliases.first().unwrap_or(&recipe.name.to_lowercase())
+                                    recipe
+                                        .aliases
+                                        .first()
+                                        .unwrap_or(&recipe.name.to_lowercase())
                                 );
                             } else {
                                 println!(
@@ -871,7 +905,11 @@ fn cmd_update(verbose: bool) -> i32 {
                                 detail_indent,
                                 effective_local,
                                 remote_version,
-                                if managed { " [managed]" } else { " [unmanaged]" }
+                                if managed {
+                                    " [managed]"
+                                } else {
+                                    " [unmanaged]"
+                                }
                             );
                         }
                         VersionComparison::AheadOfUpstream => {
@@ -880,7 +918,11 @@ fn cmd_update(verbose: bool) -> i32 {
                                 detail_indent,
                                 effective_local,
                                 remote_version,
-                                if managed { " [managed]" } else { " [unmanaged]" }
+                                if managed {
+                                    " [managed]"
+                                } else {
+                                    " [unmanaged]"
+                                }
                             );
                         }
                         VersionComparison::NotInstalled => {}
@@ -950,7 +992,9 @@ fn cmd_update(verbose: bool) -> i32 {
         for app in previous.apps {
             if app.managed
                 && local::get_local_version(&app.name).is_some()
-                && !cached_apps.iter().any(|a| a.name.eq_ignore_ascii_case(&app.name))
+                && !cached_apps
+                    .iter()
+                    .any(|a| a.name.eq_ignore_ascii_case(&app.name))
             {
                 cached_apps.push(app);
             }
@@ -989,11 +1033,7 @@ fn cmd_update(verbose: bool) -> i32 {
         );
     }
 
-    if had_errors {
-        1
-    } else {
-        0
-    }
+    if had_errors { 1 } else { 0 }
 }
 
 #[cfg(test)]
