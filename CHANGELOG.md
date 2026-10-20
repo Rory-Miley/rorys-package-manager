@@ -10,6 +10,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ---
 
+## [0.4.4] - 2026-10-19
+
+### Added
+- **Install & Upgrade Recipe Origin Badges**: `rpm install` and `rpm upgrade` now display color-coded recipe origin and track badges (`[recipe: rpm]`, `[recipe: homebrew (verified)]`, `[recipe: homebrew (upstream)]`) directly in the installation/upgrade header and up-to-date notices.
+- **Expanded Verbose Diagnostics (`-v` / `--verbose`)**: Added explicit staging path, expected vs. calculated SHA-256 digests, and source-to-destination archive extraction paths (`DMG`, `ZIP`, `TAR.GZ`, `TAR.XZ`) when running with `-v`.
+- Unit test `test_format_install_and_upgrade_headers` verifying install and upgrade header formatting across native and Homebrew tracks.
+
+### Changed
+- **Minimalist Default Install Output**: Gated Homebrew Cask catalog discovery notices strictly behind `-v` / `--verbose` so default `rpm install` output remains clean and pip-like.
+
+---
+
 ## [0.4.3] - 2026-10-15
 
 ### Added

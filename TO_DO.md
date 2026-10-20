@@ -6,13 +6,6 @@ This file tracks planned features, enhancements, and roadmap items for `rpm`. Wo
 
 ## High Priority
 
-- [ ] **Install Output Transparency & Verbosity Overhaul (`rpm install <app>`)**
-  - Explicitly display recipe origin: indicate whether an app is sourced from native `rpm` recipes or `homebrew` casks.
-  - For Homebrew casks, display the active download track (`verified` vs `upstream`).
-  - Standardize default vs. verbose (`-v`) output:
-    - Default mode: clean, minimal, informative progress without raw URLs, hex digests, or intermediate extraction details.
-    - Verbose mode (`-v` / `--verbose`): display detailed payload URLs, staging paths, calculated SHA-256 digests, and archive extraction steps.
-
 - [ ] **Homebrew to RPM Migration Tool (`src/migrate.rs`)**
   - **Command**: `rpm migrate [homebrew]`
   - **Safety & Zero-Disruption Invariant**: Ultra-safe. Existing applications in `/Applications` are left completely intact and untouched (no re-downloading, no bundle swapping, zero risk of data loss).

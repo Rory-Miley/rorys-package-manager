@@ -502,7 +502,7 @@ fn cmd_install(
             let lookup_token = target_cask_token.as_deref().unwrap_or(query);
             match network::fetch_homebrew_cask_info(lookup_token) {
                 Ok(info) => {
-                    if verbose || !switching_track {
+                    if verbose {
                         println!("\x1b[1;34m==>\x1b[0m Found '{}' in Homebrew Cask catalog.", info.name);
                     }
 
@@ -646,8 +646,10 @@ fn cmd_install(
     let comparison = version::compare(&local_version, &remote_version);
     if comparison == VersionComparison::UpToDate && is_managed && !clean {
         println!(
-            "\x1b[1;34m==>\x1b[0m {} [{}] is already installed and current.",
-            recipe.name, local_version
+            "\x1b[1;34m==>\x1b[0m {} [{}] {} is already installed and current.",
+            recipe.name,
+            local_version,
+            recipe.origin().colored_badge()
         );
         return 0;
     } else if comparison == VersionComparison::AheadOfUpstream && !clean {

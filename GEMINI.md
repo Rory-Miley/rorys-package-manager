@@ -20,7 +20,9 @@ When the user requests to **commit and push** (or wrap up a feature/release):
    - Ask if the user wants to increment the version number in `Cargo.toml` (state the current version and propose next semver increment, e.g. `Current version is 0.4.3. Increment to 0.4.4?`).
    - Ask if the user wants to tag the release with that version (e.g. `git tag 0.4.4`).
    - Ask if the user wants to update `README.md` to align with the current status and feature set of the project.
-3. **Changelog Maintenance**: Ensure notable user-facing changes are documented under the corresponding version heading in [`CHANGELOG.md`](./CHANGELOG.md).
+3. **Changelog & To-Do Maintenance**:
+   - Ensure notable user-facing changes are documented under the corresponding version heading in [`CHANGELOG.md`](./CHANGELOG.md).
+   - Once a task in [`TO_DO.md`](./TO_DO.md) is completed, **remove it completely from `TO_DO.md`** rather than leaving it checked off, since completed work is permanently recorded in `CHANGELOG.md`.
 4. **README Alignment**: If requested by the user, update `README.md` to reflect new commands, flags, or architecture.
 5. **Execute**: Stage changed files, commit, create the git tag if requested, and push to origin.
 
@@ -44,7 +46,7 @@ When testing local commands in dev mode, clean up any temporary scratch files or
 ### File Separation
 - **`README.md`**: Public user-facing project documentation, install instructions, CLI usage guide, and feature showcase.
 - **`GEMINI.md`** (this file): Architectural context, invariant design principles, decided product rules, recipe schema, and assistant protocols.
-- **`TO_DO.md`**: Feature backlog, prioritized to-dos, and future roadmap items.
+- **`TO_DO.md`**: Active feature backlog, prioritized to-dos, and future roadmap items (completed tasks are removed once recorded in `CHANGELOG.md`).
 - **`CHANGELOG.md`**: Full historical release notes following the [Keep a Changelog](https://keepachangelog.com/) standard.
 
 ---

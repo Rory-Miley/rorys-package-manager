@@ -24,6 +24,32 @@ pub fn apps_ready_to_upgrade() -> Result<Vec<CachedApp>, String> {
         .collect())
 }
 
+/// Formats the standard `==> Installing <App> [<version>] [recipe: ...]` header line.
+pub fn format_install_header(recipe: &Recipe, remote_version: &str) -> String {
+    format!(
+        "\x1b[1;34m==>\x1b[0m Installing \x1b[1m{}\x1b[0m [{}] {}",
+        recipe.name,
+        remote_version,
+        recipe.origin().colored_badge()
+    )
+}
+
+/// Formats the standard `==> Upgrading <App> ([<local>] → [<remote>]) [recipe: ...]` header line.
+pub fn format_upgrade_header(
+    app_name: &str,
+    local_version: &str,
+    remote_version: &str,
+    matching_recipe: Option<&Recipe>,
+) -> String {
+    let origin_badge = matching_recipe
+        .map(|r| format!(" {}", r.origin().colored_badge()))
+        .unwrap_or_default();
+
+    format!(
+        "\x1b[1;34m==>\x1b[0m Upgrading \x1b[1m{}\x1b[0m ([{}] → [{}]){}",
+        app_name, local_version, remote_version, origin_badge
+    )
+}
 /// Upgrades all pending apps using their associated recipes or cache definitions.
 pub fn upgrade_pending(verbose: bool, clean: bool) -> Result<usize, String> {
     let pending = apps_ready_to_upgrade().map_err(|e| {
@@ -53,12 +79,11 @@ pub fn upgrade_pending(verbose: bool, clean: bool) -> Result<usize, String> {
             continue;
         }
 
-        println!(
-            "\x1b[1;34m==>\x1b[0m Upgrading \x1b[1m{}\x1b[0m ([{}] → [{}])",
-            app.name, app.local_version, app.remote_version
-        );
-
         let matching_recipe = recipe::find_recipe(&app.name, &recipes);
+        println!(
+            "{}",
+            format_upgrade_header(&app.name, &app.local_version, &app.remote_version, matching_recipe)
+        );
         let bundle_name = matching_recipe
             .map(|r| r.bundle_name.as_str())
             .unwrap_or(app.name.as_str());
@@ -265,10 +290,7 @@ pub fn install_recipe(
         ));
     }
 
-    println!(
-        "\x1b[1;34m==>\x1b[0m Installing \x1b[1m{}\x1b[0m [{}]",
-        recipe.name, remote_version
-    );
+    println!("{}", format_install_header(recipe, remote_version));
 
     let dynamic_cask_sha = if recipe.sha256.is_none() {
         if let SourceConfig::HomebrewCask { cask } = &recipe.source {
@@ -737,10 +759,14 @@ fn download_for_app(
 
     if verbose {
         println!("    📥 Fetching payload from {}", download_url);
+        println!("    📂 Staging path: {}", dest.display());
+        if let Some(exp) = expected_sha256 {
+            println!("    🔒 Expected SHA-256: \x1b[90m{}\x1b[0m", exp);
+        }
     }
     let hash = network::download_file_with_hash(download_url, &dest, expected_sha256)?;
     if verbose {
-        println!("    🔒 SHA-256 Verified: \x1b[32m{}\x1b[0m", hash);
+        println!("    🔒 Calculated SHA-256: \x1b[32m{}\x1b[0m", hash);
     }
     Ok((dest, hash))
 }
@@ -775,7 +801,7 @@ fn extract_dmg(dmg: &Path, bundle_name: &str, verbose: bool) -> Result<PathBuf, 
     fs::create_dir_all(&mount).map_err(|e| format!("Failed to create mount point: {}", e))?;
 
     if verbose {
-        println!("    💿 Mounting DMG (unattended)...");
+        println!("    💿 Mounting DMG (unattended): {} → {}...", dmg.display(), mount.display());
     }
     let mut child = Command::new("hdiutil")
         .args([
@@ -823,7 +849,7 @@ fn extract_dmg(dmg: &Path, bundle_name: &str, verbose: bool) -> Result<PathBuf, 
         };
         let staged = extract_root.join(clean_name);
         if verbose {
-            println!("    📂 Staging {}...", bundle_name);
+            println!("    📂 Staging {} → {}...", bundle_name, staged.display());
         }
         ditto_copy(&app_src, &staged)?;
         Ok(staged)
@@ -844,9 +870,9 @@ fn extract_zip(zip: &Path, bundle_name: &str, verbose: bool) -> Result<PathBuf, 
     fs::create_dir_all(&extract_root)
         .map_err(|e| format!("Failed to create extract dir: {}", e))?;
 
-    if verbose {
-        println!("    📦 Extracting ZIP archive...");
-    }
+        if verbose {
+            println!("    📦 Extracting ZIP archive: {} → {}...", zip.display(), extract_root.display());
+        }
     let status = Command::new("ditto")
         .args([
             "-x",
@@ -870,9 +896,9 @@ fn extract_tar_gz(tar: &Path, bundle_name: &str, verbose: bool) -> Result<PathBu
     fs::create_dir_all(&extract_root)
         .map_err(|e| format!("Failed to create extract dir: {}", e))?;
 
-    if verbose {
-        println!("    📦 Extracting TAR.GZ archive...");
-    }
+        if verbose {
+            println!("    📦 Extracting TAR.GZ archive: {} → {}...", tar.display(), extract_root.display());
+        }
     let status = Command::new("tar")
         .args([
             "-xzf",
@@ -896,9 +922,9 @@ fn extract_tar_xz(tar: &Path, bundle_name: &str, verbose: bool) -> Result<PathBu
     fs::create_dir_all(&extract_root)
         .map_err(|e| format!("Failed to create extract dir: {}", e))?;
 
-    if verbose {
-        println!("    📦 Extracting TAR.XZ archive...");
-    }
+        if verbose {
+            println!("    📦 Extracting TAR.XZ archive: {} → {}...", tar.display(), extract_root.display());
+        }
     let status = Command::new("tar")
         .args([
             "-xJf",
@@ -1294,5 +1320,32 @@ mod tests {
             fs::read_to_string(dst.join("Contents/test.txt")).unwrap(),
             "hello"
         );
+    }
+
+    #[test]
+    fn test_format_install_and_upgrade_headers() {
+        let mut r_rpm = make_test_recipe("LibreWolf", "LibreWolf.app", vec![]);
+        r_rpm.origin = Some("rpm".to_string());
+        let header_rpm = format_install_header(&r_rpm, "135.0-1");
+        assert!(header_rpm.contains("Installing"));
+        assert!(header_rpm.contains("LibreWolf"));
+        assert!(header_rpm.contains("[135.0-1]"));
+        assert!(header_rpm.contains("[recipe: \x1b[34mrpm\x1b[0m]"));
+
+        let mut r_hb_ver = make_test_recipe("VLC media player", "VLC.app", vec![]);
+        r_hb_ver.origin = Some("homebrew".to_string());
+        r_hb_ver.track = Some("verified".to_string());
+        let header_hb_ver = format_install_header(&r_hb_ver, "3.0.21");
+        assert!(header_hb_ver.contains("VLC media player"));
+        assert!(header_hb_ver.contains("[3.0.21]"));
+        assert!(header_hb_ver.contains("[recipe: \x1b[35mhomebrew (verified)\x1b[0m]"));
+
+        let mut r_hb_up = make_test_recipe("HandBrake", "HandBrake.app", vec![]);
+        r_hb_up.origin = Some("homebrew".to_string());
+        r_hb_up.track = Some("upstream".to_string());
+        let upg_header = format_upgrade_header("HandBrake", "1.8.0", "1.8.2", Some(&r_hb_up));
+        assert!(upg_header.contains("Upgrading"));
+        assert!(upg_header.contains("([1.8.0] → [1.8.2])"));
+        assert!(upg_header.contains("[recipe: \x1b[35mhomebrew (upstream)\x1b[0m]"));
     }
 }
