@@ -47,13 +47,20 @@ pub fn run(args: &[String]) -> i32 {
             } else {
                 None
             };
-            let app = args.iter().skip(2).find(|arg| !arg.starts_with('-'));
-            match app {
-                Some(app) => cmd_install(app, is_verbose, is_clean, track_override),
-                None => {
-                    eprintln!("\x1b[31mUsage:\x1b[0m {} install [-v] [-c] [--upstream | --verified] <app>", paths::runner_cmd());
-                    1
-                }
+            let apps: Vec<&str> = args
+                .iter()
+                .skip(2)
+                .filter(|arg| !arg.starts_with('-'))
+                .map(String::as_str)
+                .collect();
+            if apps.is_empty() {
+                eprintln!(
+                    "\x1b[31mUsage:\x1b[0m {} install [-v] [-c] [--upstream | --verified] <app>...",
+                    paths::runner_cmd()
+                );
+                1
+            } else {
+                cmd_install(&apps, is_verbose, is_clean, track_override)
             }
         },
         "uninstall" => match args.get(2) {
@@ -123,8 +130,8 @@ fn print_help() {
 \x1b[1mCommands:\x1b[0m
   update [-v]            Check installed apps against upstream, evaluate versions, and write update cache
   upgrade [-v] [-c]      Download, verify SHA-256, and install pending updates (from cache)
-  install [-v] [-c] [--upstream | --verified] <app>
-                         Install a package on-demand (-c for clean install)
+  install [-v] [-c] [--upstream | --verified] <app>...
+                         Install one or more packages on-demand (-c for clean install)
   uninstall <app>        Safely remove a managed app from /Applications
   cleanup [app] [-v]     Remove cached downloads from staging (or for a specific app)
   list [-v]              List installed packages and their versions (use -v or -verbose for details)
@@ -278,8 +285,6 @@ fn cmd_homebrew(args: &[String]) -> i32 {
 
 /// `rpm upgrade` — read `local/cache.toml`, download + verify + install pending apps.
 fn cmd_upgrade(verbose: bool, clean: bool) -> i32 {
-    println!("\x1b[1;34m==>\x1b[0m \x1b[1mUpgrading apps from update cache...\x1b[0m");
-
     match installer::upgrade_pending(verbose, clean) {
         Ok(0) => {
             println!(
@@ -288,13 +293,7 @@ fn cmd_upgrade(verbose: bool, clean: bool) -> i32 {
             );
             0
         }
-        Ok(n) => {
-            println!(
-                "\x1b[1;34m==>\x1b[0m \x1b[32mSuccessfully upgraded {} app(s).\x1b[0m",
-                n
-            );
-            0
-        }
+        Ok(_n) => 0,
         Err(e) => {
             eprintln!("\x1b[31mupgrade failed:\x1b[0m {}", e);
             1
@@ -397,25 +396,17 @@ fn generate_cask_recipe_toml(
     }
 }
 
-/// `rpm install <app>` — fetch latest release and install, then mark managed in cache.
-fn cmd_install(
+/// Resolves a single package query into a `Recipe` via local recipes, GitHub raw, or Homebrew Cask API.
+fn resolve_single_query(
     query: &str,
+    recipes: &[recipe::Recipe],
     verbose: bool,
-    clean: bool,
     track_override: Option<config::HomebrewTrack>,
-) -> i32 {
-    let recipes = match recipe::load_recipes() {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("\x1b[31mFailed to load recipes: {}\x1b[0m", e);
-            return 1;
-        }
-    };
-
+) -> Option<recipe::Recipe> {
     let mut switching_track = false;
     let mut target_cask_token: Option<String> = None;
 
-    let resolved_recipe = if let Some(r) = recipe::find_recipe(query, &recipes) {
+    let resolved_recipe = if let Some(r) = recipe::find_recipe(query, recipes) {
         let track_mismatch = match track_override {
             Some(req_track) => !r.matches_homebrew_track(req_track),
             None => false,
@@ -451,216 +442,296 @@ fn cmd_install(
         None
     };
 
-    let resolved_recipe = if let Some(r) = resolved_recipe {
-        Some(r)
-    } else {
-        if verbose && !switching_track {
-            println!(
-                "\x1b[1;34m==>\x1b[0m '{}' not found locally. Searching upstream catalogs...",
-                query
-            );
-        }
-
-        // 1. Check native GitHub raw (skip if switching track for known Homebrew cask)
-        let native_opt = if !switching_track {
-            match network::fetch_raw_github_recipe(query) {
-                Ok(opt) => opt,
-                Err(e) => {
-                    if verbose {
-                        eprintln!("    \x1b[90m(Native upstream check: {})\x1b[0m", e);
-                    }
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        if let Some(raw_toml) = native_opt {
-            match toml::from_str::<recipe::Recipe>(&raw_toml) {
-                Ok(mut rec) => {
-                    let dest_dir = paths::recipes_dir().join("rpm");
-                    let _ = std::fs::create_dir_all(&dest_dir);
-                    let target_path = dest_dir.join(format!("{}.toml", query.to_lowercase()));
-                    if let Err(e) = std::fs::write(&target_path, &raw_toml) {
-                        eprintln!("\x1b[31mFailed to save recipe: {}\x1b[0m", e);
-                        return 1;
-                    }
-                    rec.recipe_path = Some(target_path);
-                    if verbose {
-                        println!("  \x1b[32m✓\x1b[0m Fetched native recipe: {}", rec.name);
-                    }
-                    Some(rec)
-                }
-                Err(e) => {
-                    eprintln!("\x1b[31mFailed to parse remote recipe: {}\x1b[0m", e);
-                    None
-                }
-            }
-        } else {
-            // 2. Check Homebrew Cask API
-            let lookup_token = target_cask_token.as_deref().unwrap_or(query);
-            match network::fetch_homebrew_cask_info(lookup_token) {
-                Ok(info) => {
-                    if verbose {
-                        println!("\x1b[1;34m==>\x1b[0m Found '{}' in Homebrew Cask catalog.", info.name);
-                    }
-
-                    // Pre-flight check: strict refusal if target exists and is unmanaged
-                    let clean_bundle = if info.bundle_name.ends_with(".app") {
-                        info.bundle_name.clone()
-                    } else {
-                        format!("{}.app", info.bundle_name)
-                    };
-                    let target = std::path::PathBuf::from(format!("/Applications/{}", clean_bundle));
-                    if target.exists() && !cache::was_managed(&info.name) && !cache::was_managed(&clean_bundle) {
-                        eprintln!(
-                            "\x1b[31mError:\x1b[0m '{}' is already installed at /Applications/{} but is not managed by rpm.\n\
-                             For security and system integrity, rpm will not overwrite applications installed outside this package manager.\n\
-                             To manage '{}' with rpm:\n  \
-                             1. Uninstall or remove '/Applications/{}' (e.g. drag to Trash or run: rm -rf '/Applications/{}')\n  \
-                             2. Reinstall via rpm: {} install {}",
-                            info.name,
-                            clean_bundle,
-                            info.name,
-                            clean_bundle,
-                            clean_bundle,
-                            paths::runner_cmd(),
-                            info.token
-                        );
-                        return 1;
-                    }
-
-                    if info.disabled {
-                        println!(
-                            "  \x1b[33mNotice:\x1b[0m Homebrew cask is disabled ({}: {}). rpm will strip quarantine.",
-                            info.name,
-                            info.disable_reason.as_deref().unwrap_or("fails security check")
-                        );
-                    }
-
-                    let effective_track = track_override.unwrap_or_else(|| {
-                        let cfg = config::Config::load_or_default();
-                        match cfg.homebrew.track {
-                            config::HomebrewTrack::Request => prompt_user_for_track(&info.name),
-                            other => other,
-                        }
-                    });
-
-                    let toml_content = generate_cask_recipe_toml(&info, effective_track);
-                    let cask_dir = paths::recipes_dir().join("homebrew").join("cask");
-                    let _ = std::fs::create_dir_all(&cask_dir);
-                    let recipe_path = cask_dir.join(format!("{}.toml", info.token));
-
-                    if let Err(e) = std::fs::write(&recipe_path, &toml_content) {
-                        eprintln!("\x1b[31mFailed to save generated recipe: {}\x1b[0m", e);
-                        return 1;
-                    }
-
-                    if verbose {
-                        println!(
-                            "  \x1b[32m✓\x1b[0m Generated recipe: {} [track: {}]",
-                            recipe_path.display(),
-                            effective_track.as_str()
-                        );
-                    }
-
-                    match toml::from_str::<recipe::Recipe>(&toml_content) {
-                        Ok(mut rec) => {
-                            rec.recipe_path = Some(recipe_path);
-                            Some(rec)
-                        }
-                        Err(e) => {
-                            eprintln!("\x1b[31mFailed to parse generated recipe: {}\x1b[0m", e);
-                            None
-                        }
-                    }
-                }
-                Err(_) => {
-                    eprintln!(
-                        "\x1b[31mError:\x1b[0m Package '{}' not found in rpm recipes or Homebrew casks.",
-                        query
-                    );
-                    return 1;
-                }
-            }
-        }
-    };
-
-    let recipe = match resolved_recipe {
-        Some(ref r) => r,
-        None => return 1,
-    };
-
-    let all_recipes = recipe::load_recipes().unwrap_or_default();
-    if let Err(e) = installer::check_conflicting_apps(recipe, &all_recipes) {
-        eprintln!("\x1b[31mConflict error:\x1b[0m {}", e);
-        return 1;
+    if let Some(r) = resolved_recipe {
+        return Some(r);
     }
 
-    let clean_bundle = if recipe.bundle_name.ends_with(".app") {
-        recipe.bundle_name.clone()
-    } else {
-        format!("{}.app", recipe.bundle_name)
-    };
-    let target = std::path::PathBuf::from(format!("/Applications/{}", clean_bundle));
-    let is_managed = cache::was_managed(&recipe.name);
-
-    if target.exists() && !is_managed {
-        let alias = recipe.aliases.first().map(|s| s.as_str()).unwrap_or(&recipe.name);
-        eprintln!(
-            "\x1b[31mError:\x1b[0m '{}' is already installed at /Applications/{} but is not managed by rpm.\n\
-             For security and system integrity, rpm will not overwrite applications installed outside this package manager.\n\
-             To manage '{}' with rpm:\n  \
-             1. Uninstall or remove '/Applications/{}' (e.g. drag to Trash or run: rm -rf '/Applications/{}')\n  \
-             2. Reinstall via rpm: {} install {}",
-            recipe.name,
-            clean_bundle,
-            recipe.name,
-            clean_bundle,
-            clean_bundle,
-            paths::runner_cmd(),
-            alias
-        );
-        return 1;
-    }
-
-    if verbose {
+    if verbose && !switching_track {
         println!(
-            "\x1b[1;34m==>\x1b[0m Resolving package \x1b[1m{}\x1b[0m...",
-            recipe.name
+            "\x1b[1;34m==>\x1b[0m '{}' not found locally. Searching upstream catalogs...",
+            query
         );
     }
 
-    let (remote_version, download_url) = match network::resolve_recipe(recipe) {
-        Ok(pair) => pair,
+    // 1. Check native GitHub raw (skip if switching track for known Homebrew cask)
+    let native_opt = if !switching_track {
+        match network::fetch_raw_github_recipe(query) {
+            Ok(opt) => opt,
+            Err(e) => {
+                if verbose {
+                    eprintln!("    \x1b[90m(Native upstream check: {})\x1b[0m", e);
+                }
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    if let Some(raw_toml) = native_opt {
+        match toml::from_str::<recipe::Recipe>(&raw_toml) {
+            Ok(mut rec) => {
+                let dest_dir = paths::recipes_dir().join("rpm");
+                let _ = std::fs::create_dir_all(&dest_dir);
+                let target_path = dest_dir.join(format!("{}.toml", query.to_lowercase()));
+                if let Err(e) = std::fs::write(&target_path, &raw_toml) {
+                    eprintln!("\x1b[31mFailed to save recipe: {}\x1b[0m", e);
+                    return None;
+                }
+                rec.recipe_path = Some(target_path);
+                if verbose {
+                    println!("  \x1b[32m✓\x1b[0m Fetched native recipe: {}", rec.name);
+                }
+                Some(rec)
+            }
+            Err(e) => {
+                eprintln!("\x1b[31mFailed to parse remote recipe: {}\x1b[0m", e);
+                None
+            }
+        }
+    } else {
+        // 2. Check Homebrew Cask API
+        let lookup_token = target_cask_token.as_deref().unwrap_or(query);
+        match network::fetch_homebrew_cask_info(lookup_token) {
+            Ok(info) => {
+                if verbose {
+                    println!("\x1b[1;34m==>\x1b[0m Found '{}' in Homebrew Cask catalog.", info.name);
+                }
+
+                // Pre-flight check: strict refusal if target exists and is unmanaged
+                let clean_bundle = if info.bundle_name.ends_with(".app") {
+                    info.bundle_name.clone()
+                } else {
+                    format!("{}.app", info.bundle_name)
+                };
+                let target = std::path::PathBuf::from(format!("/Applications/{}", clean_bundle));
+                if target.exists()
+                    && !cache::was_managed(&info.name)
+                    && !cache::was_managed(&clean_bundle)
+                {
+                    eprintln!(
+                        "\x1b[31mError:\x1b[0m '{}' is already installed at /Applications/{} but is not managed by rpm.\n\
+                         For security and system integrity, rpm will not overwrite applications installed outside this package manager.\n\
+                         To manage '{}' with rpm:\n  \
+                         1. Uninstall or remove '/Applications/{}' (e.g. drag to Trash or run: rm -rf '/Applications/{}')\n  \
+                         2. Reinstall via rpm: {} install {}",
+                        info.name,
+                        clean_bundle,
+                        info.name,
+                        clean_bundle,
+                        clean_bundle,
+                        paths::runner_cmd(),
+                        info.token
+                    );
+                    return None;
+                }
+
+                if info.disabled {
+                    println!(
+                        "  \x1b[33mNotice:\x1b[0m Homebrew cask is disabled ({}: {}). rpm will strip quarantine.",
+                        info.name,
+                        info.disable_reason.as_deref().unwrap_or("fails security check")
+                    );
+                }
+
+                let effective_track = track_override.unwrap_or_else(|| {
+                    let cfg = config::Config::load_or_default();
+                    match cfg.homebrew.track {
+                        config::HomebrewTrack::Request => prompt_user_for_track(&info.name),
+                        other => other,
+                    }
+                });
+
+                let toml_content = generate_cask_recipe_toml(&info, effective_track);
+                let cask_dir = paths::recipes_dir().join("homebrew").join("cask");
+                let _ = std::fs::create_dir_all(&cask_dir);
+                let recipe_path = cask_dir.join(format!("{}.toml", info.token));
+
+                if let Err(e) = std::fs::write(&recipe_path, &toml_content) {
+                    eprintln!("\x1b[31mFailed to save generated recipe: {}\x1b[0m", e);
+                    return None;
+                }
+
+                if verbose {
+                    println!(
+                        "  \x1b[32m✓\x1b[0m Generated recipe: {} [track: {}]",
+                        recipe_path.display(),
+                        effective_track.as_str()
+                    );
+                }
+
+                match toml::from_str::<recipe::Recipe>(&toml_content) {
+                    Ok(mut rec) => {
+                        rec.recipe_path = Some(recipe_path);
+                        Some(rec)
+                    }
+                    Err(e) => {
+                        eprintln!("\x1b[31mFailed to parse generated recipe: {}\x1b[0m", e);
+                        None
+                    }
+                }
+            }
+            Err(_) => {
+                eprintln!(
+                    "\x1b[31mError:\x1b[0m Package '{}' not found in rpm recipes or Homebrew casks.",
+                    query
+                );
+                None
+            }
+        }
+    }
+}
+
+/// Checks whether two recipes in the same install batch declare conflicts against each other.
+fn recipes_conflict_with_each_other(a: &recipe::Recipe, b: &recipe::Recipe) -> bool {
+    let matches_recipe = |r: &recipe::Recipe, tok: &str| {
+        r.name.eq_ignore_ascii_case(tok)
+            || r.bundle_name.eq_ignore_ascii_case(tok)
+            || r.bundle_name
+                .trim_end_matches(".app")
+                .eq_ignore_ascii_case(tok)
+            || r.aliases.iter().any(|al| al.eq_ignore_ascii_case(tok))
+    };
+
+    a.conflicting_applications
+        .iter()
+        .any(|tok| matches_recipe(b, tok))
+        || b.conflicting_applications
+            .iter()
+            .any(|tok| matches_recipe(a, tok))
+}
+
+/// `rpm install <app>...` — resolve one or more packages, download all in phase 1, then install all in phase 2.
+fn cmd_install(
+    queries: &[&str],
+    verbose: bool,
+    clean: bool,
+    track_override: Option<config::HomebrewTrack>,
+) -> i32 {
+    let mut recipes = match recipe::load_recipes() {
+        Ok(r) => r,
         Err(e) => {
-            eprintln!("\x1b[31mFailed to resolve release for {}: {}\x1b[0m", recipe.name, e);
+            eprintln!("\x1b[31mFailed to load recipes: {}\x1b[0m", e);
             return 1;
         }
     };
 
-    let local_version = local::get_recipe_local_version(recipe)
-        .unwrap_or_else(|| "Not Installed".to_string());
+    let mut resolved_list: Vec<recipe::Recipe> = Vec::new();
 
-    let comparison = version::compare(&local_version, &remote_version);
-    if comparison == VersionComparison::UpToDate && is_managed && !clean {
-        println!(
-            "\x1b[1;34m==>\x1b[0m {} [{}] {} is already installed and current.",
-            recipe.name,
-            local_version,
-            recipe.origin().colored_badge()
-        );
-        return 0;
-    } else if comparison == VersionComparison::AheadOfUpstream && !clean {
-        println!(
-            "\x1b[33mNotice:\x1b[0m Local version [{}] is newer than upstream [{}].",
-            local_version, remote_version
-        );
+    for &query in queries {
+        let Some(rec) = resolve_single_query(query, &recipes, verbose, track_override) else {
+            return 1;
+        };
+        // Reload recipes if a new recipe was saved to disk
+        if let Ok(updated) = recipe::load_recipes() {
+            recipes = updated;
+        }
+        // Avoid duplicate entries if user typed `rpm install vlc vlc`
+        if !resolved_list
+            .iter()
+            .any(|existing| existing.name.eq_ignore_ascii_case(&rec.name))
+        {
+            resolved_list.push(rec);
+        }
     }
 
-    match installer::install_recipe(recipe, &remote_version, &download_url, verbose, clean) {
-        Ok(()) => 0,
+    // Check conflicts against installed apps and between apps in the same batch
+    for (i, rec) in resolved_list.iter().enumerate() {
+        if let Err(e) = installer::check_conflicting_apps(rec, &recipes) {
+            eprintln!("\x1b[31mConflict error:\x1b[0m {}", e);
+            return 1;
+        }
+        for other in resolved_list.iter().skip(i + 1) {
+            if recipes_conflict_with_each_other(rec, other) {
+                eprintln!(
+                    "\x1b[31mConflict error:\x1b[0m Cannot install '{}' and '{}' together because they conflict with each other.",
+                    rec.name, other.name
+                );
+                return 1;
+            }
+        }
+    }
+
+    let mut batch: Vec<(recipe::Recipe, String, String)> = Vec::new();
+
+    for recipe in resolved_list {
+        let clean_bundle = if recipe.bundle_name.ends_with(".app") {
+            recipe.bundle_name.clone()
+        } else {
+            format!("{}.app", recipe.bundle_name)
+        };
+        let target = std::path::PathBuf::from(format!("/Applications/{}", clean_bundle));
+        let is_managed = cache::was_managed(&recipe.name);
+
+        if target.exists() && !is_managed {
+            let alias = recipe
+                .aliases
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or(&recipe.name);
+            eprintln!(
+                "\x1b[31mError:\x1b[0m '{}' is already installed at /Applications/{} but is not managed by rpm.\n\
+                 For security and system integrity, rpm will not overwrite applications installed outside this package manager.\n\
+                 To manage '{}' with rpm:\n  \
+                 1. Uninstall or remove '/Applications/{}' (e.g. drag to Trash or run: rm -rf '/Applications/{}')\n  \
+                 2. Reinstall via rpm: {} install {}",
+                recipe.name,
+                clean_bundle,
+                recipe.name,
+                clean_bundle,
+                clean_bundle,
+                paths::runner_cmd(),
+                alias
+            );
+            return 1;
+        }
+
+        if verbose {
+            println!(
+                "\x1b[1;34m==>\x1b[0m Resolving package \x1b[1m{}\x1b[0m...",
+                recipe.name
+            );
+        }
+
+        let (remote_version, download_url) = match network::resolve_recipe(&recipe) {
+            Ok(pair) => pair,
+            Err(e) => {
+                eprintln!(
+                    "\x1b[31mFailed to resolve release for {}: {}\x1b[0m",
+                    recipe.name, e
+                );
+                return 1;
+            }
+        };
+
+        let local_version = local::get_recipe_local_version(&recipe)
+            .unwrap_or_else(|| "Not Installed".to_string());
+
+        let comparison = version::compare(&local_version, &remote_version);
+        if comparison == VersionComparison::UpToDate && is_managed && !clean {
+            println!(
+                "\x1b[1;34m==>\x1b[0m {} [{}] {} is already installed and current.",
+                recipe.name,
+                local_version,
+                recipe.origin().colored_badge()
+            );
+            continue;
+        } else if comparison == VersionComparison::AheadOfUpstream && !clean {
+            println!(
+                "\x1b[33mNotice:\x1b[0m {} local version [{}] is newer than upstream [{}].",
+                recipe.name, local_version, remote_version
+            );
+        }
+
+        batch.push((recipe, remote_version, download_url));
+    }
+
+    if batch.is_empty() {
+        return 0;
+    }
+
+    match installer::install_recipes_batch(&batch, verbose, clean) {
+        Ok(_) => 0,
         Err(e) => {
             eprintln!("\x1b[31minstall failed:\x1b[0m {}", e);
             1
@@ -715,14 +786,15 @@ fn cmd_update(verbose: bool) -> i32 {
 
     let installed_recipes: Vec<(&recipe::Recipe, String)> = recipes
         .iter()
-        .filter_map(|r| {
-            local::get_recipe_local_version(r).map(|ver| (r, ver))
-        })
+        .filter_map(|r| local::get_recipe_local_version(r).map(|ver| (r, ver)))
         .collect();
 
     if installed_recipes.is_empty() {
         println!("\x1b[1;34m==>\x1b[0m No installed packages found to check.");
-        println!("    Run \x1b[1m{} install <app>\x1b[0m to install a package.", paths::runner_cmd());
+        println!(
+            "    Run \x1b[1m{} install <app>\x1b[0m to install a package.",
+            paths::runner_cmd()
+        );
         return 0;
     }
 
@@ -733,12 +805,19 @@ fn cmd_update(verbose: bool) -> i32 {
 
     let mut cached_apps: Vec<CachedApp> = Vec::new();
     let mut had_errors = false;
+    let total = installed_recipes.len();
 
-    for (recipe, local_version) in installed_recipes {
-        print!("🔍 Checking {}... ", recipe.name);
-        let _ = std::io::stdout().flush();
+    for (idx, (recipe, local_version)) in installed_recipes.into_iter().enumerate() {
+        let is_last = idx + 1 == total;
+        let branch = if is_last { "└─" } else { "├─" };
+        let detail_indent = if is_last {
+            "     "
+        } else {
+            "  \x1b[38;2;90;90;90m│\x1b[0m  "
+        };
 
         let managed = cache::was_managed(&recipe.name);
+        let origin_badge = recipe.origin().colored_badge();
 
         match network::resolve_recipe_info(recipe) {
             Ok((remote_version, download_url, sha256)) => {
@@ -760,31 +839,36 @@ fn cmd_update(verbose: bool) -> i32 {
                     _ => false,
                 };
 
+                println!(
+                    "  \x1b[38;2;90;90;90m{}\x1b[0m \x1b[1m{}\x1b[0m {}",
+                    branch, recipe.name, origin_badge
+                );
+
                 if verbose {
                     match comparison {
                         VersionComparison::UpdateAvailable => {
                             if !managed {
                                 println!(
-                                    "\n  ⚠️  Local: [\x1b[33m{}\x1b[0m] → Upstream: [\x1b[32m{}\x1b[0m] (Unmanaged: installed outside rpm)",
-                                    effective_local, remote_version
+                                    "{}⚠️  Local: [\x1b[33m{}\x1b[0m] → Upstream: [\x1b[32m{}\x1b[0m] (Unmanaged: installed outside rpm)",
+                                    detail_indent, effective_local, remote_version
                                 );
                                 println!(
-                                    "     \x1b[90mSkipping updates. To manage with rpm, uninstall it from /Applications and run '{} install {}'.\x1b[0m",
+                                    "{}   \x1b[90mSkipping updates. To manage with rpm, uninstall it from /Applications and run '{} install {}'.\x1b[0m",
+                                    detail_indent,
                                     paths::runner_cmd(),
                                     recipe.aliases.first().unwrap_or(&recipe.name.to_lowercase())
                                 );
                             } else {
                                 println!(
-                                    "\n  🚀 Local: [\x1b[33m{}\x1b[0m] → Upstream: [\x1b[32m{}\x1b[0m] (Update available){}",
-                                    effective_local,
-                                    remote_version,
-                                    if managed { " [managed]" } else { "" }
+                                    "{}🚀 Local: [\x1b[33m{}\x1b[0m] → Upstream: [\x1b[32m{}\x1b[0m] (Update available) [managed]",
+                                    detail_indent, effective_local, remote_version
                                 );
                             }
                         }
                         VersionComparison::UpToDate => {
                             println!(
-                                "\n  ✨ Local: [\x1b[32m{}\x1b[0m] == Upstream: [\x1b[32m{}\x1b[0m] (Current){}",
+                                "{}✨ Local: [\x1b[32m{}\x1b[0m] == Upstream: [\x1b[32m{}\x1b[0m] (Current){}",
+                                detail_indent,
                                 effective_local,
                                 remote_version,
                                 if managed { " [managed]" } else { " [unmanaged]" }
@@ -792,7 +876,8 @@ fn cmd_update(verbose: bool) -> i32 {
                         }
                         VersionComparison::AheadOfUpstream => {
                             println!(
-                                "\n  💎 Local: [\x1b[35m{}\x1b[0m] > Upstream: [\x1b[36m{}\x1b[0m] (Ahead of upstream / Dev build){}",
+                                "{}💎 Local: [\x1b[35m{}\x1b[0m] > Upstream: [\x1b[36m{}\x1b[0m] (Ahead of upstream / Dev build){}",
+                                detail_indent,
                                 effective_local,
                                 remote_version,
                                 if managed { " [managed]" } else { " [unmanaged]" }
@@ -801,28 +886,38 @@ fn cmd_update(verbose: bool) -> i32 {
                         VersionComparison::NotInstalled => {}
                     }
 
-                    println!("  🔗 \x1b[90m{}\x1b[0m", download_url);
+                    println!("{}🔗 \x1b[90m{}\x1b[0m", detail_indent, download_url);
                     if let Some(ref expected_hash) = sha256 {
-                        println!("  🔒 Expected SHA-256: \x1b[90m{}\x1b[0m", expected_hash);
+                        println!(
+                            "{}🔒 Expected SHA-256: \x1b[90m{}\x1b[0m",
+                            detail_indent, expected_hash
+                        );
                     }
                 } else {
                     match comparison {
                         VersionComparison::UpdateAvailable => {
-                            println!(
-                                "\n  Local: [\x1b[33m{}\x1b[0m] < Upstream: [\x1b[32m{}\x1b[0m]",
-                                effective_local, remote_version
-                            );
+                            if !managed {
+                                println!(
+                                    "{}Local: [\x1b[33m{}\x1b[0m] < Upstream: [\x1b[32m{}\x1b[0m] \x1b[33m(Unmanaged — skipping)\x1b[0m",
+                                    detail_indent, effective_local, remote_version
+                                );
+                            } else {
+                                println!(
+                                    "{}Local: [\x1b[33m{}\x1b[0m] < Upstream: [\x1b[32m{}\x1b[0m] \x1b[32m(Update available)\x1b[0m",
+                                    detail_indent, effective_local, remote_version
+                                );
+                            }
                         }
                         VersionComparison::UpToDate => {
                             println!(
-                                "\n  Local: [\x1b[32m{}\x1b[0m] == Upstream: [\x1b[32m{}\x1b[0m]",
-                                effective_local, remote_version
+                                "{}Local: [\x1b[32m{}\x1b[0m] == Upstream: [\x1b[32m{}\x1b[0m] \x1b[90m(Current)\x1b[0m",
+                                detail_indent, effective_local, remote_version
                             );
                         }
                         VersionComparison::AheadOfUpstream => {
                             println!(
-                                "\n  Local: [\x1b[35m{}\x1b[0m] > Upstream: [\x1b[36m{}\x1b[0m]",
-                                effective_local, remote_version
+                                "{}Local: [\x1b[35m{}\x1b[0m] > Upstream: [\x1b[36m{}\x1b[0m] \x1b[36m(Ahead of upstream)\x1b[0m",
+                                detail_indent, effective_local, remote_version
                             );
                         }
                         VersionComparison::NotInstalled => {}
@@ -840,7 +935,11 @@ fn cmd_update(verbose: bool) -> i32 {
                 });
             }
             Err(e) => {
-                println!("\x1b[31mError ({})\x1b[0m", e);
+                println!(
+                    "  \x1b[38;2;90;90;90m{}\x1b[0m \x1b[1m{}\x1b[0m {}",
+                    branch, recipe.name, origin_badge
+                );
+                println!("{}\x1b[31mError ({})\x1b[0m", detail_indent, e);
                 had_errors = true;
             }
         }
@@ -894,5 +993,66 @@ fn cmd_update(verbose: bool) -> i32 {
         1
     } else {
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_recipes_conflict_with_each_other() {
+        let chromium: recipe::Recipe = toml::from_str(
+            r#"
+name = "Chromium"
+aliases = ["chrome"]
+bundle_name = "Chromium.app"
+conflicting_applications = ["Chromium Snapshot"]
+
+[source]
+type = "github_release"
+locator = "macchrome/macstable"
+
+[livecheck]
+strategy = "github_latest_release"
+"#,
+        )
+        .unwrap();
+
+        let snapshot: recipe::Recipe = toml::from_str(
+            r#"
+name = "Chromium Snapshot"
+aliases = ["chromium-snapshot"]
+bundle_name = "Chromium.app"
+
+[source]
+type = "chromium_snapshot"
+
+[livecheck]
+strategy = "chromium_dash"
+"#,
+        )
+        .unwrap();
+
+        let vlc: recipe::Recipe = toml::from_str(
+            r#"
+name = "VLC"
+aliases = ["vlc"]
+bundle_name = "VLC.app"
+
+[source]
+type = "homebrew_cask"
+cask = "vlc"
+
+[livecheck]
+strategy = "homebrew_cask"
+cask = "vlc"
+"#,
+        )
+        .unwrap();
+
+        assert!(recipes_conflict_with_each_other(&chromium, &snapshot));
+        assert!(recipes_conflict_with_each_other(&snapshot, &chromium));
+        assert!(!recipes_conflict_with_each_other(&chromium, &vlc));
     }
 }

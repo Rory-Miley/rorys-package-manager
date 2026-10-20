@@ -20,10 +20,6 @@ This file tracks planned features, enhancements, and roadmap items for `rpm`. Wo
     - Discover and present an enumerated list of all currently Homebrew-managed casks and their installed versions.
     - Provide interactive selection prompt allowing the user to select specific casks (e.g., `1, 3-5`), select all (`a` / `all`), or cancel.
 
-- [ ] **Installation Progress Bar (`src/progress.rs` & `src/installer.rs`)**
-  - Add a dedicated terminal progress bar for the archive extraction and `.app` bundle installation phase.
-  - Match the exact layout, dynamic terminal width scaling, speed, and ETA metrics of the existing download progress bar, but styled in **green** instead of orange to visually distinguish the installation step from downloading.
-
 - [ ] **Modernise `README.md` & Add Operation Demo GIF**
   - Restructure `README.md` to present core app functionality and CLI usage first.
   - Remove feature section bloat for a cleaner, more concise layout.

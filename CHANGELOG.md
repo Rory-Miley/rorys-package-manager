@@ -10,6 +10,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ---
 
+## [0.4.5] - 2026-10-20
+
+### Added
+- **Multi-Package Batch Installation**: `rpm install [-v] [-c] [--upstream | --verified] <app1> [app2 ...]` now accepts multiple packages in a single command, resolving all targets and verifying cross-package conflict compatibility (`recipes_conflict_with_each_other`) before downloading.
+- **Two-Phase Connected Tree Pipeline (`install` & `upgrade`)**: Unified `rpm install` and `rpm upgrade` into a connected `├─` / `│` / `└─` tree workflow that downloads and verifies all packages in Phase 1 (`==> Downloading N package(s)...`) and then extracts and installs all packages in Phase 2 (`==> Installing N package(s)...`).
+- **Slate-Cyan Installation Progress Bar**: Added `InstallProgress` and `render_install_progress_line` in `src/progress.rs` (`\x1b[38;2;90;145;165m`) tracking real-time archive extraction (`DMG`, `ZIP`, `TAR.GZ`, `TAR.XZ`) and `.app` bundle installation via uncompressed size estimation (`hdiutil imageinfo`, `unzip -Zt`, TAR heuristic) and symlink-aware directory byte polling (`compute_dir_size`).
+- **Proactive Multi-Bar Terminal Resize Sync (`TreeTranscript`)**: Resizing the terminal window wider or narrower during multi-stage or multi-package operations dynamically redraws all previously completed bars in the active tree to match the new window width and clears soft-wrapped ghost lines.
+- **Unit Tests**: Added `test_render_install_progress_line_green_color_and_bounds`, `test_render_install_progress_line_completion`, `test_download_and_install_bars_always_equal_length`, `test_compute_dir_size_skips_symlinks`, `test_parse_unzip_zt_total`, `test_format_tree_branch_headers`, and `test_recipes_conflict_with_each_other`.
+
+### Changed
+- **Tree-Aligned `rpm update` Output**: Updated `rpm update` and `rpm update -v` to render package checks, version comparisons, download URLs, and SHA-256 digests inside the unified `├─` / `│` / `└─` tree hierarchy.
+- **Locked Equal Progress Bar Widths**: Standardized right-hand progress metrics (`MB`, speed, elapsed/ETA) to a fixed 36-character column width (`{:>5.1}/{:>5.1} MB • {:>10} • {:>6}`) so Download and Install progress bars always share identical `[` and `]` bracket positions regardless of payload size or duration.
+
+---
+
 ## [0.4.4] - 2026-10-19
 
 ### Added

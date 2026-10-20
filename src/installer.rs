@@ -1,6 +1,7 @@
 use crate::cache::{self, CachedApp, UpdateCache};
 use crate::local;
 use crate::network;
+use crate::progress::{InstallProgress, TreeTranscript, TREE_LAST_INDENT, TREE_TRUNK_INDENT};
 use crate::recipe::{self, Recipe, SourceConfig};
 use std::fs;
 use std::io::Write;
@@ -24,33 +25,41 @@ pub fn apps_ready_to_upgrade() -> Result<Vec<CachedApp>, String> {
         .collect())
 }
 
-/// Formats the standard `==> Installing <App> [<version>] [recipe: ...]` header line.
-pub fn format_install_header(recipe: &Recipe, remote_version: &str) -> String {
-    format!(
-        "\x1b[1;34m==>\x1b[0m Installing \x1b[1m{}\x1b[0m [{}] {}",
-        recipe.name,
-        remote_version,
-        recipe.origin().colored_badge()
-    )
-}
-
-/// Formats the standard `==> Upgrading <App> ([<local>] → [<remote>]) [recipe: ...]` header line.
-pub fn format_upgrade_header(
-    app_name: &str,
-    local_version: &str,
-    remote_version: &str,
-    matching_recipe: Option<&Recipe>,
+/// Formats a package branch header line inside the Download or Install tree (`├─` / `└─`).
+pub fn format_tree_branch_header(
+    branch: &str,
+    task: &BatchInstallTask,
+    is_upgrade: bool,
+    include_origin: bool,
 ) -> String {
-    let origin_badge = matching_recipe
-        .map(|r| format!(" {}", r.origin().colored_badge()))
-        .unwrap_or_default();
-
+    let ver_display = match (&task.local_version, is_upgrade) {
+        (Some(local_ver), true) => format!("([{}] → [{}])", local_ver, task.remote_version),
+        _ => format!("[{}]", task.remote_version),
+    };
+    let origin = if include_origin {
+        task.origin_badge.as_str()
+    } else {
+        ""
+    };
     format!(
-        "\x1b[1;34m==>\x1b[0m Upgrading \x1b[1m{}\x1b[0m ([{}] → [{}]){}",
-        app_name, local_version, remote_version, origin_badge
+        "  \x1b[38;2;90;90;90m{}\x1b[0m \x1b[1m{}\x1b[0m {}{}",
+        branch, task.name, ver_display, origin
     )
 }
-/// Upgrades all pending apps using their associated recipes or cache definitions.
+/// Represents a single resolved application ready for the two-phase Download → Install tree pipeline.
+#[derive(Clone, Debug)]
+pub struct BatchInstallTask {
+    pub name: String,
+    pub bundle_name: String,
+    pub local_version: Option<String>,
+    pub remote_version: String,
+    pub download_url: String,
+    pub expected_sha256: Option<String>,
+    pub quarantine_strip: bool,
+    pub origin_badge: String,
+}
+
+/// Upgrades all pending apps using the unified two-phase Download → Install tree pipeline.
 pub fn upgrade_pending(verbose: bool, clean: bool) -> Result<usize, String> {
     let pending = apps_ready_to_upgrade().map_err(|e| {
         format!(
@@ -67,8 +76,7 @@ pub fn upgrade_pending(verbose: bool, clean: bool) -> Result<usize, String> {
     ensure_staging()?;
     let recipes = recipe::load_recipes().unwrap_or_default();
 
-    let mut upgraded = 0usize;
-    let mut errors: Vec<String> = Vec::new();
+    let mut tasks: Vec<BatchInstallTask> = Vec::new();
 
     for app in &pending {
         if !app.managed {
@@ -80,60 +88,278 @@ pub fn upgrade_pending(verbose: bool, clean: bool) -> Result<usize, String> {
         }
 
         let matching_recipe = recipe::find_recipe(&app.name, &recipes);
-        println!(
-            "{}",
-            format_upgrade_header(&app.name, &app.local_version, &app.remote_version, matching_recipe)
-        );
         let bundle_name = matching_recipe
-            .map(|r| r.bundle_name.as_str())
-            .unwrap_or(app.name.as_str());
+            .map(|r| r.bundle_name.clone())
+            .unwrap_or_else(|| app.name.clone());
         let quarantine_strip = matching_recipe.map(|r| r.quarantine_strip).unwrap_or(true);
-        let expected_sha256 = matching_recipe.and_then(|r| r.sha256.as_deref());
+        let expected_sha256 = matching_recipe
+            .and_then(|r| r.sha256.clone())
+            .or_else(|| app.sha256.clone());
+        let origin_badge = matching_recipe
+            .map(|r| format!(" {}", r.origin().colored_badge()))
+            .unwrap_or_default();
 
-        match install_bundle_pipeline(
-            &app.name,
+        tasks.push(BatchInstallTask {
+            name: app.name.clone(),
             bundle_name,
-            &app.remote_version,
-            &app.download_url,
+            local_version: Some(app.local_version.clone()),
+            remote_version: app.remote_version.clone(),
+            download_url: app.download_url.clone(),
             expected_sha256,
             quarantine_strip,
+            origin_badge,
+        });
+    }
+
+    if tasks.is_empty() {
+        return Ok(0);
+    }
+
+    execute_batch_pipeline(&tasks, true, verbose, clean)
+}
+
+/// Installs a batch of resolved recipes using the unified two-phase Download → Install tree pipeline.
+pub fn install_recipes_batch(
+    items: &[(Recipe, String, String)],
+    verbose: bool,
+    clean: bool,
+) -> Result<usize, String> {
+    if items.is_empty() {
+        return Ok(0);
+    }
+
+    let all_recipes = recipe::load_recipes().unwrap_or_default();
+    let mut tasks: Vec<BatchInstallTask> = Vec::new();
+
+    for (recipe, remote_version, download_url) in items {
+        check_conflicting_apps(recipe, &all_recipes)?;
+
+        let clean_bundle = if recipe.bundle_name.ends_with(".app") {
+            recipe.bundle_name.clone()
+        } else {
+            format!("{}.app", recipe.bundle_name)
+        };
+        let target = PathBuf::from(format!("/Applications/{}", clean_bundle));
+        if target.exists() && !cache::was_managed(&recipe.name) {
+            let alias = recipe
+                .aliases
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or(&recipe.name);
+            return Err(format!(
+                "'{}' is already installed at /Applications/{} but is not managed by rpm.\n\
+                 For security and system integrity, rpm will not overwrite applications installed outside this package manager.\n\
+                 To manage '{}' with rpm:\n  \
+                 1. Uninstall or remove '/Applications/{}' (e.g. drag to Trash or run: rm -rf '/Applications/{}')\n  \
+                 2. Reinstall via rpm: {} install {}",
+                recipe.name,
+                clean_bundle,
+                recipe.name,
+                clean_bundle,
+                clean_bundle,
+                paths::runner_cmd(),
+                alias
+            ));
+        }
+
+        let dynamic_cask_sha = if recipe.sha256.is_none() {
+            if let SourceConfig::HomebrewCask { cask } = &recipe.source {
+                network::fetch_homebrew_cask_info(cask)
+                    .ok()
+                    .and_then(|i| i.sha256)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let effective_sha = recipe.sha256.clone().or(dynamic_cask_sha);
+
+        tasks.push(BatchInstallTask {
+            name: recipe.name.clone(),
+            bundle_name: recipe.bundle_name.clone(),
+            local_version: None,
+            remote_version: remote_version.clone(),
+            download_url: download_url.clone(),
+            expected_sha256: effective_sha,
+            quarantine_strip: recipe.quarantine_strip,
+            origin_badge: format!(" {}", recipe.origin().colored_badge()),
+        });
+    }
+
+    execute_batch_pipeline(&tasks, false, verbose, clean)
+}
+
+/// Core two-phase tree pipeline:
+/// 1. Downloads all packages in `tasks` under `==> Downloading N package(s)...`
+/// 2. Connects via `│` trunk into `==> Installing N package(s)...`
+/// 3. Extracts, validates, strips quarantine, and atomically swaps each bundle into `/Applications`.
+pub fn execute_batch_pipeline(
+    tasks: &[BatchInstallTask],
+    is_upgrade: bool,
+    verbose: bool,
+    clean: bool,
+) -> Result<usize, String> {
+    if tasks.is_empty() {
+        return Ok(0);
+    }
+
+    ensure_staging()?;
+
+    // Pre-flight unmanaged check for all tasks
+    for task in tasks {
+        if task.download_url.is_empty() {
+            return Err(format!("No download URL provided for '{}'", task.name));
+        }
+        let clean_bundle = if task.bundle_name.ends_with(".app") {
+            task.bundle_name.clone()
+        } else {
+            format!("{}.app", task.bundle_name)
+        };
+        let target = PathBuf::from(format!("/Applications/{}", clean_bundle));
+        if target.exists()
+            && !cache::was_managed(&task.name)
+            && !cache::was_managed(&task.bundle_name)
+        {
+            return Err(format!(
+                "'{}' is already installed at /Applications/{} but is not managed by rpm.\n\
+                 For security and system integrity, rpm will not overwrite applications installed outside this package manager.\n\
+                 To manage '{}' with rpm:\n  \
+                 1. Uninstall or remove '/Applications/{}' (e.g. drag to Trash or run: rm -rf '/Applications/{}')\n  \
+                 2. Reinstall via rpm: {} install {}",
+                task.name,
+                clean_bundle,
+                task.name,
+                clean_bundle,
+                clean_bundle,
+                paths::runner_cmd(),
+                task.name.to_lowercase()
+            ));
+        }
+    }
+
+    let mut transcript = TreeTranscript::new();
+    let dl_pkg_word = if tasks.len() == 1 {
+        "package"
+    } else {
+        "packages"
+    };
+    transcript.println(format!(
+        "\x1b[1;34m==>\x1b[0m \x1b[1mDownloading {} {}...\x1b[0m",
+        tasks.len(),
+        dl_pkg_word
+    ));
+
+    let mut downloaded_items: Vec<(&BatchInstallTask, PathBuf, String)> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+
+    for (idx, task) in tasks.iter().enumerate() {
+        let branch = if idx + 1 == tasks.len() { "└─" } else { "├─" };
+        transcript.println(format_tree_branch_header(branch, task, is_upgrade, true));
+
+        match download_for_app_in_tree(
+            &task.name,
+            &task.remote_version,
+            &task.download_url,
+            task.expected_sha256.as_deref(),
             verbose,
             clean,
+            TREE_TRUNK_INDENT,
+            &mut transcript,
         ) {
-            Ok(calculated_hash) => {
-                local::set_bundle_rpm_version(bundle_name, &app.remote_version);
-                if let Err(e) = mark_managed(
-                    &app.name,
-                    &app.remote_version,
-                    &app.remote_version,
-                    &app.download_url,
-                    Some(calculated_hash),
-                ) {
-                    eprintln!(
-                        "  \x1b[33mwarning:\x1b[0m installed but failed to update cache: {}",
-                        e
-                    );
-                }
-                println!("  \x1b[32m✓\x1b[0m {} installed successfully.", app.name);
-                upgraded += 1;
+            Ok((archive_path, sha256_hash)) => {
+                downloaded_items.push((task, archive_path, sha256_hash));
             }
             Err(e) => {
-                eprintln!("  \x1b[31m✗\x1b[0m {}: {}", app.name, e);
-                errors.push(format!("{}: {}", app.name, e));
+                transcript.println(format!(
+                    "{}\x1b[31m✗\x1b[0m {}: {}",
+                    TREE_TRUNK_INDENT, task.name, e
+                ));
+                errors.push(format!("{}: {}", task.name, e));
             }
         }
+    }
+
+    let mut completed_names: Vec<String> = Vec::new();
+
+    if !downloaded_items.is_empty() {
+        transcript.println("  \x1b[38;2;90;90;90m│\x1b[0m");
+        let inst_pkg_word = if downloaded_items.len() == 1 {
+            "package"
+        } else {
+            "packages"
+        };
+        transcript.println(format!(
+            "\x1b[1;34m==>\x1b[0m \x1b[1mInstalling {} {}...\x1b[0m",
+            downloaded_items.len(),
+            inst_pkg_word
+        ));
+
+        let total_to_install = downloaded_items.len();
+        for (idx, (task, archive_path, sha256_hash)) in downloaded_items.into_iter().enumerate() {
+            let is_last = idx + 1 == total_to_install;
+            let branch = if is_last { "└─" } else { "├─" };
+            let bar_indent = if is_last {
+                TREE_LAST_INDENT
+            } else {
+                TREE_TRUNK_INDENT
+            };
+
+            transcript.println(format_tree_branch_header(branch, task, is_upgrade, false));
+
+            match install_extracted_bundle_in_tree(
+                &archive_path,
+                &task.bundle_name,
+                task.quarantine_strip,
+                verbose,
+                bar_indent,
+                &mut transcript,
+            ) {
+                Ok(()) => {
+                    local::set_bundle_rpm_version(&task.bundle_name, &task.remote_version);
+                    if let Err(e) = mark_managed(
+                        &task.name,
+                        &task.remote_version,
+                        &task.remote_version,
+                        &task.download_url,
+                        Some(sha256_hash),
+                    ) {
+                        transcript.println(format!(
+                            "{}\x1b[33mwarning:\x1b[0m installed but failed to update cache: {}",
+                            bar_indent, e
+                        ));
+                    }
+                    completed_names.push(task.name.clone());
+                }
+                Err(e) => {
+                    transcript.println(format!(
+                        "{}\x1b[31m✗\x1b[0m {}: {}",
+                        bar_indent, task.name, e
+                    ));
+                    errors.push(format!("{}: {}", task.name, e));
+                }
+            }
+        }
+    }
+
+    if !completed_names.is_empty() {
+        println!(
+            "\n\x1b[1;34m==>\x1b[0m \x1b[32m{} {} package(s).\x1b[0m",
+            if is_upgrade { "Upgraded" } else { "Installed" },
+            completed_names.len()
+        );
     }
 
     if !errors.is_empty() {
         return Err(format!(
             "Finished with {} success(es) and {} failure(s):\n  - {}",
-            upgraded,
+            completed_names.len(),
             errors.len(),
             errors.join("\n  - ")
         ));
     }
 
-    Ok(upgraded)
+    Ok(completed_names.len())
 }
 
 /// Compatibility handler: Checks if any application conflicting with `recipe` is currently installed.
@@ -265,67 +491,16 @@ pub fn install_recipe(
     verbose: bool,
     clean: bool,
 ) -> Result<(), String> {
-    let all_recipes = recipe::load_recipes().unwrap_or_default();
-    check_conflicting_apps(recipe, &all_recipes)?;
-
-    let clean_bundle = if recipe.bundle_name.ends_with(".app") {
-        recipe.bundle_name.clone()
-    } else {
-        format!("{}.app", recipe.bundle_name)
-    };
-    let target = PathBuf::from(format!("/Applications/{}", clean_bundle));
-    if target.exists() && !cache::was_managed(&recipe.name) {
-        let alias = recipe
-            .aliases
-            .first()
-            .map(|s| s.as_str())
-            .unwrap_or(&recipe.name);
-        return Err(format!(
-            "'{}' is already installed at /Applications/{} but is not managed by rpm.\n\
-             For security and system integrity, rpm will not overwrite applications installed outside this package manager.\n\
-             To manage '{}' with rpm:\n  \
-             1. Uninstall or remove '/Applications/{}' (e.g. drag to Trash or run: rm -rf '/Applications/{}')\n  \
-             2. Reinstall via rpm: {} install {}",
-            recipe.name, clean_bundle, recipe.name, clean_bundle, clean_bundle, paths::runner_cmd(), alias
-        ));
-    }
-
-    println!("{}", format_install_header(recipe, remote_version));
-
-    let dynamic_cask_sha = if recipe.sha256.is_none() {
-        if let SourceConfig::HomebrewCask { cask } = &recipe.source {
-            network::fetch_homebrew_cask_info(cask).ok().and_then(|i| i.sha256)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    let effective_sha = recipe.sha256.as_deref().or(dynamic_cask_sha.as_deref());
-
-    let calculated_hash = install_bundle_pipeline(
-        &recipe.name,
-        &recipe.bundle_name,
-        remote_version,
-        download_url,
-        effective_sha,
-        recipe.quarantine_strip,
+    install_recipes_batch(
+        &[(
+            recipe.clone(),
+            remote_version.to_string(),
+            download_url.to_string(),
+        )],
         verbose,
         clean,
-    )?;
-
-    local::set_bundle_rpm_version(&recipe.bundle_name, remote_version);
-
-    mark_managed(
-        &recipe.name,
-        remote_version,
-        remote_version,
-        download_url,
-        Some(calculated_hash),
-    )?;
-
-    println!("  \x1b[32m✓\x1b[0m {} installed successfully.", recipe.name);
-    Ok(())
+    )
+    .map(|_| ())
 }
 
 /// Backwards-compatible install helper.
@@ -462,6 +637,64 @@ pub fn uninstall_app(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Unpacks a downloaded archive in staging, validates its `.app` structure, strips quarantine,
+/// and atomically installs it to `/Applications` while rendering an `InstallProgress` bar in the tree.
+fn install_extracted_bundle_in_tree(
+    archive_path: &Path,
+    bundle_name: &str,
+    quarantine_strip: bool,
+    verbose: bool,
+    bar_indent: &'static str,
+    transcript: &mut TreeTranscript,
+) -> Result<(), String> {
+    let initial_estimate = estimate_archive_uncompressed_size(archive_path);
+    let mut install_progress =
+        InstallProgress::with_tree(initial_estimate, bar_indent, Some(transcript));
+
+    let pipeline_result = (|| -> Result<u64, String> {
+        let (staged_app, app_bytes) = extract_app_bundle(
+            archive_path,
+            bundle_name,
+            verbose,
+            bar_indent,
+            &mut install_progress,
+        )?;
+        local::validate_app_bundle(&staged_app)?;
+
+        if app_bytes > 0 {
+            install_progress.set_total(app_bytes);
+            install_progress.set_installed_bytes((app_bytes * 96) / 100);
+        }
+
+        install_app_bundle_atomic(
+            &staged_app,
+            bundle_name,
+            quarantine_strip,
+            verbose,
+            bar_indent,
+            &mut install_progress,
+            app_bytes,
+        )?;
+
+        Ok(app_bytes)
+    })();
+
+    // Clean extract workspace; keep the downloaded archive in staging for cache/rollback
+    let extract_root = staging_path().join(format!("extract-{}", sanitize(bundle_name)));
+    let _ = fs::remove_dir_all(&extract_root);
+
+    match pipeline_result {
+        Ok(final_bytes) => {
+            install_progress.finish(Some(final_bytes));
+            Ok(())
+        }
+        Err(e) => {
+            install_progress.clear();
+            Err(e)
+        }
+    }
+}
+
 /// Core pipeline: Download with SHA-256 verification, unpack, inspect, and atomically install.
 fn install_bundle_pipeline(
     name: &str,
@@ -500,17 +733,26 @@ fn install_bundle_pipeline(
         ));
     }
 
-    let (archive_path, sha256_hash) =
-        download_for_app(name, version, download_url, expected_sha256, verbose, clean)?;
+    let mut transcript = TreeTranscript::new();
+    let (archive_path, sha256_hash) = download_for_app_in_tree(
+        name,
+        version,
+        download_url,
+        expected_sha256,
+        verbose,
+        clean,
+        TREE_TRUNK_INDENT,
+        &mut transcript,
+    )?;
 
-    let staged_app = extract_app_bundle(&archive_path, bundle_name, verbose)?;
-    local::validate_app_bundle(&staged_app)?;
-
-    install_app_bundle_atomic(&staged_app, bundle_name, quarantine_strip, verbose)?;
-
-    // Clean extract workspace; keep the downloaded archive in staging for cache/rollback
-    let extract_root = staging_path().join(format!("extract-{}", sanitize(bundle_name)));
-    let _ = fs::remove_dir_all(&extract_root);
+    install_extracted_bundle_in_tree(
+        &archive_path,
+        bundle_name,
+        quarantine_strip,
+        verbose,
+        TREE_LAST_INDENT,
+        &mut transcript,
+    )?;
 
     Ok(sha256_hash)
 }
@@ -694,13 +936,16 @@ pub fn cleanup_staging(app_query: Option<&str>, verbose: bool) -> Result<(), Str
     Ok(())
 }
 
-fn download_for_app(
+#[allow(clippy::too_many_arguments)]
+fn download_for_app_in_tree(
     name: &str,
     version: &str,
     download_url: &str,
     expected_sha256: Option<&str>,
     verbose: bool,
     clean: bool,
+    bar_indent: &'static str,
+    transcript: &mut TreeTranscript,
 ) -> Result<(PathBuf, String), String> {
     ensure_staging()?;
     let filename = filename_from_url(download_url);
@@ -724,12 +969,15 @@ fn download_for_app(
         }
         let _ = fs::remove_file(&dest);
         if verbose {
-            println!(
-                "    🧹 Clean install requested: removed cached payload(s) for {}",
-                name
-            );
+            transcript.println(format!(
+                "{}🧹 Clean install requested: removed cached payload(s) for {}",
+                bar_indent, name
+            ));
         } else {
-            println!("    🧹 Clean install: purging cached payload");
+            transcript.println(format!(
+                "{}🧹 Clean install: purging cached payload",
+                bar_indent
+            ));
         }
     } else if dest.exists() && dest.is_file() {
         if let Ok(metadata) = fs::metadata(&dest) {
@@ -742,10 +990,17 @@ fn download_for_app(
 
                     if is_valid {
                         if verbose {
-                            println!("    📦 Using cached payload: {}", dest.display());
-                            println!("    🔒 SHA-256 Verified: \x1b[32m{}\x1b[0m", hash);
+                            transcript.println(format!(
+                                "{}📦 Using cached payload: {}",
+                                bar_indent,
+                                dest.display()
+                            ));
+                            transcript.println(format!(
+                                "{}🔒 SHA-256 Verified: \x1b[32m{}\x1b[0m",
+                                bar_indent, hash
+                            ));
                         } else {
-                            println!("    📦 Using cached payload");
+                            transcript.println(format!("{}📦 Using cached payload", bar_indent));
                         }
                         return Ok((dest, hash));
                     } else {
@@ -758,21 +1013,91 @@ fn download_for_app(
     }
 
     if verbose {
-        println!("    📥 Fetching payload from {}", download_url);
-        println!("    📂 Staging path: {}", dest.display());
+        transcript.println(format!("{}📥 Fetching payload from {}", bar_indent, download_url));
+        transcript.println(format!("{}📂 Staging path: {}", bar_indent, dest.display()));
         if let Some(exp) = expected_sha256 {
-            println!("    🔒 Expected SHA-256: \x1b[90m{}\x1b[0m", exp);
+            transcript.println(format!(
+                "{}🔒 Expected SHA-256: \x1b[90m{}\x1b[0m",
+                bar_indent, exp
+            ));
         }
     }
-    let hash = network::download_file_with_hash(download_url, &dest, expected_sha256)?;
+    let (hash, _summary) = network::download_file_with_hash_in_tree(
+        download_url,
+        &dest,
+        expected_sha256,
+        bar_indent,
+        Some(transcript),
+    )?;
     if verbose {
-        println!("    🔒 Calculated SHA-256: \x1b[32m{}\x1b[0m", hash);
+        transcript.println(format!(
+            "{}🔒 Calculated SHA-256: \x1b[32m{}\x1b[0m",
+            bar_indent, hash
+        ));
     }
     Ok((dest, hash))
 }
 
-/// Extracts `.dmg`, `.zip`, `.tar.gz`, or `.tar.xz` into staging and returns path to the `.app`.
-fn extract_app_bundle(archive: &Path, bundle_name: &str, verbose: bool) -> Result<PathBuf, String> {
+/// Computes total byte size of regular files inside `dir` without following symlinks
+/// (avoiding double-counting macOS `.framework/Versions/Current` symlinks).
+pub fn compute_dir_size(dir: &Path) -> u64 {
+    let meta = match fs::symlink_metadata(dir) {
+        Ok(m) => m,
+        Err(_) => return 0,
+    };
+    if meta.file_type().is_symlink() {
+        return 0;
+    }
+    if meta.is_file() {
+        return meta.len();
+    }
+    if !meta.is_dir() {
+        return 0;
+    }
+
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
+
+    let mut total = 0u64;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if let Ok(m) = fs::symlink_metadata(&p) {
+            if m.file_type().is_symlink() {
+                continue;
+            }
+            if m.is_file() {
+                total = total.saturating_add(m.len());
+            } else if m.is_dir() {
+                total = total.saturating_add(compute_dir_size(&p));
+            }
+        }
+    }
+    total
+}
+
+/// Parses the uncompressed byte total from `unzip -Zt` output:
+/// e.g. `1432 files, 245891234 bytes uncompressed, 98123456 bytes compressed:  60.1%`
+pub fn parse_unzip_zt_total(output: &str) -> Option<u64> {
+    for line in output.lines() {
+        if let Some(idx) = line.find("bytes uncompressed") {
+            let before = line[..idx].trim_end();
+            let token = before.split_whitespace().next_back()?;
+            let cleaned: String = token.chars().filter(|c| c.is_ascii_digit()).collect();
+            if let Ok(val) = cleaned.parse::<u64>() {
+                if val > 0 {
+                    return Some(val);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Estimates uncompressed byte size before archive extraction starts.
+/// For `.dmg`, returns `None` initially (until mounted, when exact `.app` size is read in milliseconds).
+fn estimate_archive_uncompressed_size(archive: &Path) -> Option<u64> {
     let name_lower = archive
         .file_name()
         .and_then(|f| f.to_str())
@@ -780,13 +1105,100 @@ fn extract_app_bundle(archive: &Path, bundle_name: &str, verbose: bool) -> Resul
         .to_lowercase();
 
     if name_lower.ends_with(".dmg") {
-        extract_dmg(archive, bundle_name, verbose)
-    } else if name_lower.ends_with(".zip") {
-        extract_zip(archive, bundle_name, verbose)
-    } else if name_lower.ends_with(".tar.gz") || name_lower.ends_with(".tgz") {
-        extract_tar_gz(archive, bundle_name, verbose)
+        // DMG mounts first; once mounted we measure the exact .app bundle size
+        return None;
+    }
+
+    if name_lower.ends_with(".zip") {
+        if let Ok(out) = Command::new("unzip")
+            .args(["-Zt", archive.to_str().unwrap_or_default()])
+            .output()
+        {
+            if out.status.success() {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                if let Some(bytes) = parse_unzip_zt_total(&stdout) {
+                    return Some(bytes);
+                }
+            }
+        }
     } else if name_lower.ends_with(".tar.xz") {
-        extract_tar_xz(archive, bundle_name, verbose)
+        if let Ok(out) = Command::new("xz")
+            .args(["--robot", "-l", archive.to_str().unwrap_or_default()])
+            .output()
+        {
+            if out.status.success() {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                for line in stdout.lines() {
+                    if line.starts_with("totals\t") {
+                        let cols: Vec<&str> = line.split('\t').collect();
+                        if let Some(uncomp) = cols.get(4).and_then(|s| s.parse::<u64>().ok()) {
+                            if uncomp > 0 {
+                                return Some(uncomp);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback heuristic for compressed archives (.zip, .tar.gz, .tgz, .tar.xz): ~2.5x archive size
+    fs::metadata(archive)
+        .ok()
+        .map(|m| m.len().saturating_mul(25) / 10)
+        .filter(|&b| b > 0)
+}
+
+/// Polls a running child extraction process every 40ms, updating `progress` with the size of `watched_dir`
+/// scaled up to 95% of the bar (leaving 95%–100% for validation, quarantine strip, and atomic install).
+fn wait_child_with_dir_progress(
+    mut child: std::process::Child,
+    watched_dir: &Path,
+    progress: &mut InstallProgress,
+    err_context: &str,
+) -> Result<(), String> {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    return Ok(());
+                } else {
+                    return Err(format!("{} failed (exit {})", err_context, status));
+                }
+            }
+            Ok(None) => {
+                let current_bytes = compute_dir_size(watched_dir);
+                let scaled = (current_bytes.saturating_mul(95)) / 100;
+                progress.set_installed_bytes(scaled);
+                std::thread::sleep(Duration::from_millis(40));
+            }
+            Err(e) => return Err(format!("{}: {}", err_context, e)),
+        }
+    }
+}
+
+/// Extracts `.dmg`, `.zip`, `.tar.gz`, or `.tar.xz` into staging and returns `(staged_app_path, app_bytes)`.
+fn extract_app_bundle(
+    archive: &Path,
+    bundle_name: &str,
+    verbose: bool,
+    bar_indent: &'static str,
+    progress: &mut InstallProgress,
+) -> Result<(PathBuf, u64), String> {
+    let name_lower = archive
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    if name_lower.ends_with(".dmg") {
+        extract_dmg(archive, bundle_name, verbose, bar_indent, progress)
+    } else if name_lower.ends_with(".zip") {
+        extract_zip(archive, bundle_name, verbose, bar_indent, progress)
+    } else if name_lower.ends_with(".tar.gz") || name_lower.ends_with(".tgz") {
+        extract_tar_gz(archive, bundle_name, verbose, bar_indent, progress)
+    } else if name_lower.ends_with(".tar.xz") {
+        extract_tar_xz(archive, bundle_name, verbose, bar_indent, progress)
     } else {
         Err(format!(
             "Unsupported archive type in '{}'. Expected .dmg, .zip, .tar.gz, or .tar.xz",
@@ -795,13 +1207,24 @@ fn extract_app_bundle(archive: &Path, bundle_name: &str, verbose: bool) -> Resul
     }
 }
 
-fn extract_dmg(dmg: &Path, bundle_name: &str, verbose: bool) -> Result<PathBuf, String> {
+fn extract_dmg(
+    dmg: &Path,
+    bundle_name: &str,
+    verbose: bool,
+    bar_indent: &'static str,
+    progress: &mut InstallProgress,
+) -> Result<(PathBuf, u64), String> {
     let mount = staging_path().join(format!("mnt-{}", sanitize(bundle_name)));
     let _ = fs::remove_dir_all(&mount);
     fs::create_dir_all(&mount).map_err(|e| format!("Failed to create mount point: {}", e))?;
 
     if verbose {
-        println!("    💿 Mounting DMG (unattended): {} → {}...", dmg.display(), mount.display());
+        progress.println(&format!(
+            "{}💿 Mounting DMG (unattended): {} → {}...",
+            bar_indent,
+            dmg.display(),
+            mount.display()
+        ));
     }
     let mut child = Command::new("hdiutil")
         .args([
@@ -825,6 +1248,21 @@ fn extract_dmg(dmg: &Path, bundle_name: &str, verbose: bool) -> Result<PathBuf, 
         let _ = stdin.write_all(b"Y\n");
     }
 
+    // Tick the progress bar while hdiutil attaches the DMG
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                progress.tick();
+                std::thread::sleep(Duration::from_millis(40));
+            }
+            Err(e) => {
+                let _ = fs::remove_dir_all(&mount);
+                return Err(format!("hdiutil attach failed: {}", e));
+            }
+        }
+    }
+
     let output = child
         .wait_with_output()
         .map_err(|e| format!("hdiutil attach failed: {}", e))?;
@@ -837,6 +1275,11 @@ fn extract_dmg(dmg: &Path, bundle_name: &str, verbose: bool) -> Result<PathBuf, 
 
     let result = (|| {
         let app_src = find_app_bundle(&mount, bundle_name)?;
+        let app_bytes = compute_dir_size(&app_src);
+        if app_bytes > 0 {
+            progress.set_total(app_bytes);
+        }
+
         let extract_root = staging_path().join(format!("extract-{}", sanitize(bundle_name)));
         let _ = fs::remove_dir_all(&extract_root);
         fs::create_dir_all(&extract_root)
@@ -849,10 +1292,20 @@ fn extract_dmg(dmg: &Path, bundle_name: &str, verbose: bool) -> Result<PathBuf, 
         };
         let staged = extract_root.join(clean_name);
         if verbose {
-            println!("    📂 Staging {} → {}...", bundle_name, staged.display());
+            progress.println(&format!(
+                "{}📂 Staging {} → {}...",
+                bar_indent,
+                bundle_name,
+                staged.display()
+            ));
         }
-        ditto_copy(&app_src, &staged)?;
-        Ok(staged)
+        ditto_copy_with_progress(&app_src, &staged, progress)?;
+        let final_bytes = if app_bytes > 0 {
+            app_bytes
+        } else {
+            compute_dir_size(&staged)
+        };
+        Ok((staged, final_bytes))
     })();
 
     // Always detach cleanly
@@ -864,82 +1317,121 @@ fn extract_dmg(dmg: &Path, bundle_name: &str, verbose: bool) -> Result<PathBuf, 
     result
 }
 
-fn extract_zip(zip: &Path, bundle_name: &str, verbose: bool) -> Result<PathBuf, String> {
+fn extract_zip(
+    zip: &Path,
+    bundle_name: &str,
+    verbose: bool,
+    bar_indent: &'static str,
+    progress: &mut InstallProgress,
+) -> Result<(PathBuf, u64), String> {
     let extract_root = staging_path().join(format!("extract-{}", sanitize(bundle_name)));
     let _ = fs::remove_dir_all(&extract_root);
     fs::create_dir_all(&extract_root)
         .map_err(|e| format!("Failed to create extract dir: {}", e))?;
 
-        if verbose {
-            println!("    📦 Extracting ZIP archive: {} → {}...", zip.display(), extract_root.display());
-        }
-    let status = Command::new("ditto")
+    if verbose {
+        progress.println(&format!(
+            "{}📦 Extracting ZIP archive: {} → {}...",
+            bar_indent,
+            zip.display(),
+            extract_root.display()
+        ));
+    }
+    let child = Command::new("ditto")
         .args([
             "-x",
             "-k",
             zip.to_str().unwrap_or_default(),
             extract_root.to_str().unwrap_or_default(),
         ])
-        .status()
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .map_err(|e| format!("Failed to run ditto for zip: {}", e))?;
 
-    if !status.success() {
-        return Err("ditto failed to extract zip".to_string());
-    }
+    wait_child_with_dir_progress(child, &extract_root, progress, "ditto failed to extract zip")?;
 
-    find_app_bundle(&extract_root, bundle_name)
+    let staged = find_app_bundle(&extract_root, bundle_name)?;
+    let app_bytes = compute_dir_size(&staged);
+    Ok((staged, app_bytes))
 }
 
-fn extract_tar_gz(tar: &Path, bundle_name: &str, verbose: bool) -> Result<PathBuf, String> {
+fn extract_tar_gz(
+    tar: &Path,
+    bundle_name: &str,
+    verbose: bool,
+    bar_indent: &'static str,
+    progress: &mut InstallProgress,
+) -> Result<(PathBuf, u64), String> {
     let extract_root = staging_path().join(format!("extract-{}", sanitize(bundle_name)));
     let _ = fs::remove_dir_all(&extract_root);
     fs::create_dir_all(&extract_root)
         .map_err(|e| format!("Failed to create extract dir: {}", e))?;
 
-        if verbose {
-            println!("    📦 Extracting TAR.GZ archive: {} → {}...", tar.display(), extract_root.display());
-        }
-    let status = Command::new("tar")
+    if verbose {
+        progress.println(&format!(
+            "{}📦 Extracting TAR.GZ archive: {} → {}...",
+            bar_indent,
+            tar.display(),
+            extract_root.display()
+        ));
+    }
+    let child = Command::new("tar")
         .args([
             "-xzf",
             tar.to_str().unwrap_or_default(),
             "-C",
             extract_root.to_str().unwrap_or_default(),
         ])
-        .status()
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .map_err(|e| format!("Failed to run tar for tar.gz: {}", e))?;
 
-    if !status.success() {
-        return Err("tar failed to extract tar.gz".to_string());
-    }
+    wait_child_with_dir_progress(child, &extract_root, progress, "tar failed to extract tar.gz")?;
 
-    find_app_bundle(&extract_root, bundle_name)
+    let staged = find_app_bundle(&extract_root, bundle_name)?;
+    let app_bytes = compute_dir_size(&staged);
+    Ok((staged, app_bytes))
 }
 
-fn extract_tar_xz(tar: &Path, bundle_name: &str, verbose: bool) -> Result<PathBuf, String> {
+fn extract_tar_xz(
+    tar: &Path,
+    bundle_name: &str,
+    verbose: bool,
+    bar_indent: &'static str,
+    progress: &mut InstallProgress,
+) -> Result<(PathBuf, u64), String> {
     let extract_root = staging_path().join(format!("extract-{}", sanitize(bundle_name)));
     let _ = fs::remove_dir_all(&extract_root);
     fs::create_dir_all(&extract_root)
         .map_err(|e| format!("Failed to create extract dir: {}", e))?;
 
-        if verbose {
-            println!("    📦 Extracting TAR.XZ archive: {} → {}...", tar.display(), extract_root.display());
-        }
-    let status = Command::new("tar")
+    if verbose {
+        progress.println(&format!(
+            "{}📦 Extracting TAR.XZ archive: {} → {}...",
+            bar_indent,
+            tar.display(),
+            extract_root.display()
+        ));
+    }
+    let child = Command::new("tar")
         .args([
             "-xJf",
             tar.to_str().unwrap_or_default(),
             "-C",
             extract_root.to_str().unwrap_or_default(),
         ])
-        .status()
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .map_err(|e| format!("Failed to run tar for tar.xz: {}", e))?;
 
-    if !status.success() {
-        return Err("tar failed to extract tar.xz".to_string());
-    }
+    wait_child_with_dir_progress(child, &extract_root, progress, "tar failed to extract tar.xz")?;
 
-    find_app_bundle(&extract_root, bundle_name)
+    let staged = find_app_bundle(&extract_root, bundle_name)?;
+    let app_bytes = compute_dir_size(&staged);
+    Ok((staged, app_bytes))
 }
 
 /// Finds the target `.app` bundle under `root`, with shallow recursive search.
@@ -1030,6 +1522,32 @@ fn ditto_copy(from: &Path, to: &Path) -> Result<(), String> {
     }
 }
 
+fn ditto_copy_with_progress(
+    from: &Path,
+    to: &Path,
+    progress: &mut InstallProgress,
+) -> Result<(), String> {
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create parent: {}", e))?;
+    }
+    let child = Command::new("ditto")
+        .args([
+            from.to_str().unwrap_or_default(),
+            to.to_str().unwrap_or_default(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Failed to run ditto: {}", e))?;
+
+    wait_child_with_dir_progress(
+        child,
+        to,
+        progress,
+        &format!("ditto failed copying {} → {}", from.display(), to.display()),
+    )
+}
+
 /// Relocates a directory hierarchy via fast filesystem rename (O(1) on same APFS container),
 /// falling back to ditto copy + source cleanup if across filesystem boundaries.
 fn move_or_copy_bundle(from: &Path, to: &Path) -> Result<(), String> {
@@ -1049,11 +1567,15 @@ fn move_or_copy_bundle(from: &Path, to: &Path) -> Result<(), String> {
 }
 
 /// Atomically installs the staged bundle to `/Applications/<bundle_name>`, protecting running apps.
+#[allow(clippy::too_many_arguments)]
 fn install_app_bundle_atomic(
     staged_app: &Path,
     bundle_name: &str,
     quarantine_strip: bool,
     verbose: bool,
+    bar_indent: &'static str,
+    progress: &mut InstallProgress,
+    app_bytes: u64,
 ) -> Result<(), String> {
     let clean_bundle = if bundle_name.ends_with(".app") {
         bundle_name.to_string()
@@ -1070,28 +1592,42 @@ fn install_app_bundle_atomic(
         ));
     }
     if verbose {
-        println!("    🛠  Installing to {}...", target.display());
+        progress.println(&format!("{}🛠  Installing to {}...", bar_indent, target.display()));
     }
 
     // 1. Process active check (ALWAYS visible)
     if local::is_app_running(&clean_bundle) {
-        println!("    ⚠️  Notice: {} is currently running.", clean_bundle);
-        println!("       Attempting graceful quit before upgrade...");
+        progress.println(&format!(
+            "{}⚠️  Notice: {} is currently running.",
+            bar_indent, clean_bundle
+        ));
+        progress.println(&format!(
+            "{}   Attempting graceful quit before upgrade...",
+            bar_indent
+        ));
         let _ = local::request_quit(&clean_bundle);
         std::thread::sleep(Duration::from_millis(800));
         if local::is_app_running(&clean_bundle) {
-            println!(
-                "       App still active in memory. Utilizing atomic swap to prevent corruption."
-            );
+            progress.println(&format!(
+                "{}   App still active in memory. Utilizing atomic swap to prevent corruption.",
+                bar_indent
+            ));
         }
     }
 
     // 2. Strip quarantine on the staged directory BEFORE moving
     if quarantine_strip {
         if verbose {
-            println!("    🛡️  Stripping Apple Gatekeeper quarantine attribute...");
+            progress.println(&format!(
+                "{}🛡️  Stripping Apple Gatekeeper quarantine attribute...",
+                bar_indent
+            ));
         }
         let _ = local::remove_quarantine(staged_app);
+    }
+
+    if app_bytes > 0 {
+        progress.set_installed_bytes((app_bytes * 97) / 100);
     }
 
     // 3. Atomic rename backup
@@ -1102,7 +1638,11 @@ fn install_app_bundle_atomic(
             .unwrap_or(0);
         let backup = PathBuf::from(format!("/Applications/{}.rpm-backup-{}", clean_bundle, ts));
         if verbose {
-            println!("    🔄 Backing up current install → {}", backup.display());
+            progress.println(&format!(
+                "{}🔄 Backing up current install → {}",
+                bar_indent,
+                backup.display()
+            ));
         }
         fs::rename(&target, &backup)
             .map_err(|e| format!("Failed to rename old installation: {}", e))?;
@@ -1116,6 +1656,10 @@ fn install_app_bundle_atomic(
 
     match move_result {
         Ok(()) => {
+            if app_bytes > 0 {
+                progress.set_installed_bytes((app_bytes * 98) / 100);
+            }
+
             // Verify bundle structure
             if let Err(e) = local::validate_app_bundle(&target) {
                 let _ = fs::remove_dir_all(&target);
@@ -1128,18 +1672,31 @@ fn install_app_bundle_atomic(
             // 5. Ensure quarantine is cleanly stripped from the final /Applications bundle
             if quarantine_strip {
                 if verbose {
-                    println!("    🛡️  Stripping Apple Gatekeeper quarantine attribute on target...");
+                    progress.println(&format!(
+                        "{}🛡️  Stripping Apple Gatekeeper quarantine attribute on target...",
+                        bar_indent
+                    ));
                 }
                 let _ = local::remove_quarantine(&target);
             }
 
+            if app_bytes > 0 {
+                progress.set_installed_bytes((app_bytes * 99) / 100);
+            }
+
             // 6. Register with macOS Launch Services and Spotlight so app appears in Spotlight & Launchpad immediately
             if verbose {
-                println!("    🔍 Registering application with Launch Services & Spotlight...");
+                progress.println(&format!(
+                    "{}🔍 Registering application with Launch Services & Spotlight...",
+                    bar_indent
+                ));
             }
             if let Err(e) = local::register_app_with_system(&target) {
                 if verbose {
-                    eprintln!("    ⚠️  Launch Services registration notice: {}", e);
+                    progress.println(&format!(
+                        "{}⚠️  Launch Services registration notice: {}",
+                        bar_indent, e
+                    ));
                 }
             }
 
@@ -1152,7 +1709,10 @@ fn install_app_bundle_atomic(
         }
         Err(err) => {
             if let Some(ref backup) = backup_path {
-                eprintln!("    ❌ Installation failed. Rolling back to previous install...");
+                progress.println(&format!(
+                    "{}❌ Installation failed. Rolling back to previous install...",
+                    bar_indent
+                ));
                 let _ = fs::rename(backup, &target);
             }
             Err(format!("Installation failed: {}", err))
@@ -1323,29 +1883,66 @@ mod tests {
     }
 
     #[test]
-    fn test_format_install_and_upgrade_headers() {
+    fn test_format_tree_branch_headers() {
         let mut r_rpm = make_test_recipe("LibreWolf", "LibreWolf.app", vec![]);
         r_rpm.origin = Some("rpm".to_string());
-        let header_rpm = format_install_header(&r_rpm, "135.0-1");
-        assert!(header_rpm.contains("Installing"));
+        let task_rpm = BatchInstallTask {
+            name: r_rpm.name.clone(),
+            bundle_name: r_rpm.bundle_name.clone(),
+            local_version: None,
+            remote_version: "135.0-1".to_string(),
+            download_url: "https://example.com/lw.dmg".to_string(),
+            expected_sha256: None,
+            quarantine_strip: true,
+            origin_badge: format!(" {}", r_rpm.origin().colored_badge()),
+        };
+        let header_rpm = format_tree_branch_header("├─", &task_rpm, false, true);
+        assert!(header_rpm.contains("├─"));
         assert!(header_rpm.contains("LibreWolf"));
         assert!(header_rpm.contains("[135.0-1]"));
         assert!(header_rpm.contains("[recipe: \x1b[34mrpm\x1b[0m]"));
 
-        let mut r_hb_ver = make_test_recipe("VLC media player", "VLC.app", vec![]);
-        r_hb_ver.origin = Some("homebrew".to_string());
-        r_hb_ver.track = Some("verified".to_string());
-        let header_hb_ver = format_install_header(&r_hb_ver, "3.0.21");
-        assert!(header_hb_ver.contains("VLC media player"));
-        assert!(header_hb_ver.contains("[3.0.21]"));
-        assert!(header_hb_ver.contains("[recipe: \x1b[35mhomebrew (verified)\x1b[0m]"));
-
         let mut r_hb_up = make_test_recipe("HandBrake", "HandBrake.app", vec![]);
         r_hb_up.origin = Some("homebrew".to_string());
         r_hb_up.track = Some("upstream".to_string());
-        let upg_header = format_upgrade_header("HandBrake", "1.8.0", "1.8.2", Some(&r_hb_up));
-        assert!(upg_header.contains("Upgrading"));
+        let task_upg = BatchInstallTask {
+            name: r_hb_up.name.clone(),
+            bundle_name: r_hb_up.bundle_name.clone(),
+            local_version: Some("1.8.0".to_string()),
+            remote_version: "1.8.2".to_string(),
+            download_url: "https://example.com/hb.dmg".to_string(),
+            expected_sha256: None,
+            quarantine_strip: true,
+            origin_badge: format!(" {}", r_hb_up.origin().colored_badge()),
+        };
+        let upg_header = format_tree_branch_header("└─", &task_upg, true, true);
+        assert!(upg_header.contains("└─"));
         assert!(upg_header.contains("([1.8.0] → [1.8.2])"));
         assert!(upg_header.contains("[recipe: \x1b[35mhomebrew (upstream)\x1b[0m]"));
+    }
+
+    #[test]
+    fn test_compute_dir_size_skips_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_dir = tmp.path().join("Sample.app");
+        let framework_a = app_dir.join("Contents/Frameworks/Foo.framework/Versions/A");
+        fs::create_dir_all(&framework_a).unwrap();
+        fs::write(framework_a.join("binary"), vec![0u8; 4096]).unwrap();
+
+        #[cfg(unix)]
+        {
+            let current_link = app_dir.join("Contents/Frameworks/Foo.framework/Versions/Current");
+            std::os::unix::fs::symlink(&framework_a, &current_link).unwrap();
+        }
+
+        // Size must equal only the real 4096-byte file, not double-counted via symlink
+        assert_eq!(compute_dir_size(&app_dir), 4096);
+    }
+
+    #[test]
+    fn test_parse_unzip_zt_total() {
+        let sample = "1432 files, 245891234 bytes uncompressed, 98123456 bytes compressed:  60.1%\n";
+        assert_eq!(parse_unzip_zt_total(sample), Some(245_891_234));
+        assert_eq!(parse_unzip_zt_total("invalid output"), None);
     }
 }

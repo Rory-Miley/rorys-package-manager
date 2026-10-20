@@ -517,7 +517,24 @@ pub fn download_file_with_hash(
     url: &str,
     destination_path: &Path,
     expected_sha256: Option<&str>,
-) -> Result<String, String> {
+) -> Result<(String, crate::progress::DownloadSummary), String> {
+    download_file_with_hash_in_tree(
+        url,
+        destination_path,
+        expected_sha256,
+        crate::progress::DOWNLOAD_INDENT,
+        None,
+    )
+}
+
+/// Downloads a file within a tree layout with a specified indent and optional `TreeTranscript`.
+pub fn download_file_with_hash_in_tree(
+    url: &str,
+    destination_path: &Path,
+    expected_sha256: Option<&str>,
+    indent: &'static str,
+    transcript: Option<&mut crate::progress::TreeTranscript>,
+) -> Result<(String, crate::progress::DownloadSummary), String> {
     if let Some(parent) = destination_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create download directory: {}", e))?;
@@ -542,7 +559,7 @@ pub fn download_file_with_hash(
     }
 
     let total_bytes = response.content_length();
-    let mut progress = crate::progress::DownloadProgress::new(total_bytes);
+    let mut progress = crate::progress::DownloadProgress::with_tree(total_bytes, indent, transcript);
 
     let part_path = destination_path.with_extension(format!(
         "{}.part",
@@ -572,7 +589,7 @@ pub fn download_file_with_hash(
         progress.update(bytes_read);
     }
 
-    progress.finish();
+    let summary = progress.finish();
 
     let calculated_hash = format!("{:x}", hasher.finalize());
 
@@ -589,7 +606,7 @@ pub fn download_file_with_hash(
     std::fs::rename(&part_path, destination_path)
         .map_err(|e| format!("Failed to finalize downloaded file: {}", e))?;
 
-    Ok(calculated_hash)
+    Ok((calculated_hash, summary))
 }
 
 /// Backwards-compatible download without explicit expected hash.
